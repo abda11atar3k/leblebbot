@@ -1,0 +1,95 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - env.example
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+      - redis
+      - chromadb
+    networks:
+      - leblebnet
+
+  dashboard:
+    build: ./dashboard
+    env_file:
+      - env.example
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - leblebnet
+
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - leblebnet
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - leblebnet
+
+  chromadb:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks:
+      - leblebnet
+
+  evolution-api:
+    image: atendai/evolution-api:latest
+    restart: unless-stopped
+    env_file:
+      - env.example
+    ports:
+      - "8080:8080"
+    volumes:
+      - evolution_store:/evolution/store
+      - evolution_instances:/evolution/instances
+    networks:
+      - leblebnet
+    depends_on:
+      - evolution-db
+
+  evolution-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=evolution
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=evolution
+    ports:
+      - "5432:5432"
+    volumes:
+      - evolution_db:/var/lib/postgresql/data
+    networks:
+      - leblebnet
+
+volumes:
+  mongo_data:
+  redis_data:
+  chroma_data:
+  evolution_store:
+  evolution_instances:
+  evolution_db:
+
+networks:
+  leblebnet:
+    driver: bridge

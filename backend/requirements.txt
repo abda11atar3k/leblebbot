@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+groq
+chromadb
+motor
+redis
+aiohttp
+python-multipart
+python-jose
