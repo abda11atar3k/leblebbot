@@ -1,73 +1,82 @@
 "use client";
 
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
+import { memo, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { useTranslation } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 
-const data = [
-  { name: "WhatsApp", value: 4520, color: "#25D366" },
-  { name: "Messenger", value: 2840, color: "#0084FF" },
-  { name: "Telegram", value: 1290, color: "#0088cc" },
-  { name: "Website", value: 890, color: "#2563eb" },
-];
+export const ChannelBreakdown = memo(function ChannelBreakdown() {
+  const { t, isRTL } = useTranslation();
 
-const total = data.reduce((acc, item) => acc + item.value, 0);
+  const data = useMemo(() => [
+    { name: t("channels.whatsapp"), value: 4520, color: "#25D366" },
+    { name: t("channels.messenger"), value: 2840, color: "#0084FF" },
+    { name: t("channels.telegram"), value: 1290, color: "#0088cc" },
+    { name: t("channels.website"), value: 890, color: "#2563eb" },
+  ], [t]);
 
-export function ChannelBreakdown() {
+  const total = useMemo(() => data.reduce((acc, item) => acc + item.value, 0), [data]);
+  const maxValue = useMemo(() => Math.max(...data.map(d => d.value)), [data]);
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Messages by Channel</CardTitle>
+        <CardTitle>{t("dashboard.messagesByChannel")}</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="h-[180px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} layout="vertical" margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
-              <XAxis type="number" hide />
-              <YAxis
-                type="category"
-                dataKey="name"
-                stroke="#94a3b8"
-                fontSize={12}
-                tickLine={false}
-                axisLine={false}
-                width={80}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#1e293b",
-                  border: "1px solid rgba(51, 65, 85, 0.5)",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                }}
-                itemStyle={{ color: "#f8fafc" }}
-                labelStyle={{ color: "#94a3b8" }}
-                formatter={(value: number) => [value.toLocaleString(), "Messages"]}
-              />
-              <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-                {data.map((entry, index) => (
-                  <Cell key={index} fill={entry.color} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+        {/* CSS-based horizontal bars - much faster than recharts */}
+        <div className="space-y-4">
+          {data.map((item) => {
+            const percentage = (item.value / maxValue) * 100;
+            return (
+              <div key={item.name} className="space-y-2">
+                <div className={cn(
+                  "flex items-center justify-between text-sm",
+                  isRTL && "flex-row-reverse"
+                )}>
+                  <div className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}>
+                    <div 
+                      className="w-2.5 h-2.5 rounded-full flex-shrink-0" 
+                      style={{ backgroundColor: item.color }} 
+                    />
+                    <span className="text-muted">{item.name}</span>
+                  </div>
+                  <div className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}>
+                    <span className="text-foreground font-semibold tabular-nums">
+                      {item.value.toLocaleString()}
+                    </span>
+                    <span className="text-muted text-xs w-10 tabular-nums">
+                      {((item.value / total) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+                {/* Progress bar */}
+                <div className="h-2 bg-surface-elevated rounded-full overflow-hidden">
+                  <div 
+                    className="h-full rounded-full will-change-[width]"
+                    style={{ 
+                      width: `${percentage}%`,
+                      backgroundColor: item.color,
+                      transition: 'width 300ms ease-out'
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
-        <div className="space-y-3 mt-4 pt-4 border-t border-border">
-          {data.map((item) => (
-            <div key={item.name} className="flex items-center justify-between text-sm">
-              <div className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                <span className="text-muted">{item.name}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-foreground font-medium">{item.value.toLocaleString()}</span>
-                <span className="text-muted text-xs w-12 text-right">
-                  {((item.value / total) * 100).toFixed(0)}%
-                </span>
-              </div>
-            </div>
-          ))}
+
+        {/* Summary stats */}
+        <div className={cn(
+          "flex items-center justify-between mt-6 pt-4 border-t border-border text-sm",
+          isRTL && "flex-row-reverse"
+        )}>
+          <span className="text-muted">{t("dashboard.totalLabel")}</span>
+          <span className="text-foreground font-bold tabular-nums">
+            {total.toLocaleString()}
+          </span>
         </div>
       </CardContent>
     </Card>
   );
-}
+});

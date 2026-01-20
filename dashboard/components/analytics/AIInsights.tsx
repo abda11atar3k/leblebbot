@@ -170,7 +170,7 @@ export function AIInsights({ className }: AIInsightsProps) {
             <div
               key={insight.id}
               className={cn(
-                "p-4 rounded-xl border transition-all hover:shadow-soft",
+                "p-4 rounded-xl border transition-shadow duration-150 hover:shadow-soft",
                 config.bgColor,
                 config.borderColor
               )}

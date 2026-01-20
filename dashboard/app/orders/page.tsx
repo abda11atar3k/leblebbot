@@ -219,7 +219,7 @@ export default function OrdersPage() {
                 key={f.id}
                 onClick={() => setFilter(f.id)}
                 className={cn(
-                  "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all",
+                  "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors duration-150",
                   filter === f.id
                     ? `${f.color} text-white shadow-soft`
                     : "bg-surface text-muted hover:text-foreground hover:bg-surface-elevated"

@@ -92,7 +92,7 @@ export default function Header({ title, description }: HeaderProps) {
                       setShowThemeMenu(false);
                     }}
                     className={cn(
-                      "w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-all",
+                      "w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors duration-150",
                       theme === item.value
                         ? "bg-primary text-white shadow-soft"
                         : "text-muted hover:text-foreground hover:bg-surface-elevated",

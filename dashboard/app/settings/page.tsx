@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import AppShell from "@/components/layout/AppShell";
 import { cn } from "@/lib/utils";
 import { useTranslation, LanguageSwitcher } from "@/lib/i18n";
@@ -30,12 +31,21 @@ import {
   Monitor,
   Check,
   Languages,
+  ExternalLink,
 } from "lucide-react";
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [showApiKey, setShowApiKey] = useState(false);
   const { t, isRTL } = useTranslation();
   const { theme, setTheme } = useTheme();
+
+  // Handle tab change - redirect to integrations page
+  const handleTabChange = (value: string) => {
+    if (value === "integrations") {
+      router.push("/settings/integrations");
+    }
+  };
 
   const tones = [
     { key: "professional", label: t("settings.professional") },
@@ -52,13 +62,16 @@ export default function SettingsPage() {
 
   return (
     <AppShell title={t("settings.title")} description={t("settings.subtitle")}>
-      <Tabs defaultValue="general">
+      <Tabs defaultValue="general" onValueChange={handleTabChange}>
         <TabsList className={cn("mb-6", isRTL && "flex-row-reverse")}>
           <TabsTrigger value="general">{t("settings.general")}</TabsTrigger>
           <TabsTrigger value="appearance">{t("settings.theme")}</TabsTrigger>
           <TabsTrigger value="bot">{t("settings.botSettings")}</TabsTrigger>
           <TabsTrigger value="team">{t("settings.team")}</TabsTrigger>
-          <TabsTrigger value="integrations">{t("settings.integrations")}</TabsTrigger>
+          <TabsTrigger value="integrations" className="flex items-center gap-1.5">
+            {t("settings.integrations")}
+            <ExternalLink className="w-3 h-3" />
+          </TabsTrigger>
           <TabsTrigger value="billing">{t("settings.billing")}</TabsTrigger>
         </TabsList>
 
@@ -158,7 +171,7 @@ export default function SettingsPage() {
                       key={option.value}
                       onClick={() => setTheme(option.value as "light" | "dark" | "system")}
                       className={cn(
-                        "flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-all",
+                        "flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-colors duration-150",
                         theme === option.value
                           ? "border-primary bg-primary/5"
                           : "border-border hover:border-primary/50"
@@ -213,7 +226,7 @@ export default function SettingsPage() {
                         key={tone.key}
                         onClick={() => setSelectedTone(tone.key)}
                         className={cn(
-                          "px-4 py-2.5 rounded-xl text-sm font-medium transition-all",
+                          "px-4 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150",
                           selectedTone === tone.key
                             ? "bg-primary text-white shadow-soft"
                             : "bg-surface-elevated text-muted hover:text-foreground"
@@ -338,53 +351,12 @@ export default function SettingsPage() {
           </div>
         </TabsContent>
 
-        {/* Integrations */}
+        {/* Integrations - Redirects to /settings/integrations */}
         <TabsContent value="integrations">
-          <div className="space-y-6 max-w-2xl">
-            <Card>
-              <CardHeader>
-                <CardTitle>{t("settings.apiKeys")}</CardTitle>
-                <CardDescription>{t("settings.manageApiKeys")}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <label className={cn(
-                    "block text-sm font-medium text-foreground mb-2",
-                    isRTL ? "text-end" : "text-start"
-                  )}>
-                    {t("settings.apiKey")}
-                  </label>
-                  <div className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}>
-                    <Input
-                      type={showApiKey ? "text" : "password"}
-                      defaultValue="lb_sk_1234567890abcdef"
-                      readOnly
-                      className="font-mono"
-                    />
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setShowApiKey(!showApiKey)}
-                    >
-                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </Button>
-                    <Button variant="secondary" size="sm">
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-                <div>
-                  <label className={cn(
-                    "block text-sm font-medium text-foreground mb-2",
-                    isRTL ? "text-end" : "text-start"
-                  )}>
-                    {t("settings.webhookUrl")}
-                  </label>
-                  <Input placeholder="https://your-server.com/webhook" />
-                </div>
-                <Button>{t("settings.saveChanges")}</Button>
-              </CardContent>
-            </Card>
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <p className="text-muted mb-4">{isRTL ? "جاري التحويل..." : "Redirecting..."}</p>
+            </div>
           </div>
         </TabsContent>
 

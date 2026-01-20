@@ -93,7 +93,7 @@ export function OrderCard({ order, onStatusChange, onViewConversation }: OrderCa
   const StatusIcon = status.icon;
 
   return (
-    <div className="bg-surface border border-border rounded-xl p-5 shadow-soft hover:shadow-soft-lg transition-all">
+    <div className="bg-surface border border-border rounded-xl p-5 shadow-soft hover:shadow-soft-lg transition-shadow duration-150">
       {/* Header */}
       <div className={cn(
         "flex items-start justify-between mb-4",

@@ -1,4 +1,8 @@
+"use client";
+
+import { memo } from "react";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "@/lib/i18n";
 import { ArrowUp, ArrowDown } from "lucide-react";
 
 interface StatCardProps {
@@ -12,16 +16,19 @@ interface StatCardProps {
   className?: string;
 }
 
-export function StatCard({ title, value, change, icon, className }: StatCardProps) {
+export const StatCard = memo(function StatCard({ title, value, change, icon, className }: StatCardProps) {
+  const { isRTL } = useTranslation();
+
   return (
     <div className={cn("bg-surface border border-border rounded-xl p-5", className)}>
-      <div className="flex items-start justify-between">
+      <div className={cn("flex items-start justify-between", isRTL && "flex-row-reverse")}>
         <div className="p-2.5 rounded-lg bg-primary/10">{icon}</div>
         {change && (
           <div
             className={cn(
               "flex items-center gap-1 text-sm font-medium",
-              change.trend === "up" ? "text-success" : "text-error"
+              change.trend === "up" ? "text-success" : "text-error",
+              isRTL && "flex-row-reverse"
             )}
           >
             {change.trend === "up" ? (
@@ -33,10 +40,10 @@ export function StatCard({ title, value, change, icon, className }: StatCardProp
           </div>
         )}
       </div>
-      <div className="mt-4">
-        <p className="text-2xl font-bold text-foreground">{value}</p>
+      <div className={cn("mt-4", isRTL && "text-right")}>
+        <p className="text-2xl font-bold text-foreground tabular-nums">{value}</p>
         <p className="text-sm text-muted mt-1">{title}</p>
       </div>
     </div>
   );
-}
+});

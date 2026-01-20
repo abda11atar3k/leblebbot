@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, createContext, useContext } from "react";
+import { useState, createContext, useContext, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "@/lib/i18n";
 
@@ -23,10 +23,16 @@ interface TabsProps {
   defaultValue: string;
   children: React.ReactNode;
   className?: string;
+  onValueChange?: (value: string) => void;
 }
 
-export function Tabs({ defaultValue, children, className }: TabsProps) {
-  const [value, setValue] = useState(defaultValue);
+export function Tabs({ defaultValue, children, className, onValueChange }: TabsProps) {
+  const [value, setValueState] = useState(defaultValue);
+
+  const setValue = useCallback((newValue: string) => {
+    setValueState(newValue);
+    onValueChange?.(newValue);
+  }, [onValueChange]);
 
   return (
     <TabsContext.Provider value={{ value, setValue }}>
@@ -70,7 +76,7 @@ export function TabsTrigger({ value, children, className }: TabsTriggerProps) {
     <button
       onClick={() => setValue(value)}
       className={cn(
-        "px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200 whitespace-nowrap",
+        "px-4 py-2 text-sm font-medium rounded-lg transition-colors duration-150 whitespace-nowrap",
         isSelected
           ? "bg-primary text-white shadow-soft"
           : "text-muted hover:text-foreground hover:bg-surface-elevated",

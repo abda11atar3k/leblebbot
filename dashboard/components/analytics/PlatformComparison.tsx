@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "@/lib/i18n";
 import { BarChart3 } from "lucide-react";
@@ -11,75 +12,116 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
+  Cell,
 } from "recharts";
 
-const platformData = [
-  { name: "WhatsApp", messages: 1757, color: "#25D366" },
-  { name: "Facebook", messages: 696, color: "#0084FF" },
+// Default platform data (fallback when no data provided)
+const defaultPlatformData = [
+  { name: "WhatsApp", messages: 0, color: "#25D366" },
+  { name: "Messenger", messages: 0, color: "#0084FF" },
   { name: "Instagram", messages: 0, color: "#E1306C" },
 ];
 
-interface PlatformComparisonProps {
-  className?: string;
+// Custom tooltip component for better styling
+const CustomTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-surface border border-border rounded-lg px-3 py-2 shadow-soft-lg">
+        <p className="text-sm font-medium text-foreground">{label}</p>
+        <p className="text-sm text-muted">
+          messages: <span className="font-semibold text-foreground">{payload[0].value.toLocaleString()}</span>
+        </p>
+      </div>
+    );
+  }
+  return null;
+};
+
+interface PlatformDataPoint {
+  name: string;
+  messages: number;
+  color: string;
 }
 
-export function PlatformComparison({ className }: PlatformComparisonProps) {
+interface PlatformComparisonProps {
+  className?: string;
+  data?: PlatformDataPoint[];
+}
+
+export const PlatformComparison = memo(function PlatformComparison({ className, data }: PlatformComparisonProps) {
   const { isRTL } = useTranslation();
+
+  // Use provided data or fallback to default
+  const chartData = useMemo(() => {
+    return data && data.length > 0 ? data : defaultPlatformData;
+  }, [data]);
+
+  // Calculate total messages
+  const totalMessages = useMemo(() => {
+    return chartData.reduce((sum, d) => sum + d.messages, 0);
+  }, [chartData]);
+
+  // Format large numbers
+  const formatNumber = (num: number): string => {
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
+    if (num >= 1000) return (num / 1000).toFixed(1) + "K";
+    return num.toLocaleString();
+  };
 
   return (
     <div className={cn("bg-surface border border-border rounded-xl p-5 shadow-soft", className)}>
       <div className={cn(
-        "flex items-center gap-2 mb-4",
+        "flex items-center justify-between mb-4",
         isRTL && "flex-row-reverse"
       )}>
-        <BarChart3 className="w-5 h-5 text-primary" />
-        <h3 className="text-sm font-semibold text-foreground">
-          {isRTL ? "إحصائيات المنصات" : "Platform Statistics"}
-        </h3>
+        <div className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}>
+          <BarChart3 className="w-5 h-5 text-primary" />
+          <h3 className="text-sm font-semibold text-foreground">
+            {isRTL ? "إحصائيات المنصات" : "Platform Statistics"}
+          </h3>
+        </div>
+        <span className="text-xs text-muted">
+          {isRTL ? `الإجمالي: ${formatNumber(totalMessages)}` : `Total: ${formatNumber(totalMessages)}`}
+        </span>
       </div>
       <div className="h-48">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={platformData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.2)" />
+          <BarChart data={chartData} barCategoryGap="20%">
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.2)" vertical={false} />
             <XAxis 
               dataKey="name" 
               stroke="rgb(100,116,139)" 
               fontSize={11}
               tickLine={false}
+              axisLine={false}
             />
             <YAxis 
               stroke="rgb(100,116,139)" 
               fontSize={10}
               tickLine={false}
               axisLine={false}
+              tickFormatter={(value) => formatNumber(value)}
             />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: 'rgb(30, 41, 59)',
-                border: '1px solid rgb(51, 65, 85)',
-                borderRadius: '8px',
-                fontSize: '12px',
-              }}
-            />
+            <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(100,116,139,0.1)' }} />
             <Bar 
               dataKey="messages" 
               radius={[4, 4, 0, 0]}
+              isAnimationActive={false}
             >
-              {platformData.map((entry, index) => (
-                <Bar key={index} dataKey="messages" fill={entry.color} />
+              {chartData.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={entry.color} />
               ))}
             </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>
       
-      {/* Platform Icons */}
+      {/* Platform Legend */}
       <div className={cn(
         "flex items-center justify-center gap-6 mt-4",
         isRTL && "flex-row-reverse"
       )}>
-        {platformData.map((platform) => (
+        {chartData.map((platform) => (
           <div 
             key={platform.name}
             className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}
@@ -89,10 +131,12 @@ export function PlatformComparison({ className }: PlatformComparisonProps) {
               style={{ backgroundColor: platform.color }}
             />
             <span className="text-xs text-muted">{platform.name}</span>
-            <span className="text-xs font-bold text-foreground">{platform.messages}</span>
+            <span className="text-xs font-bold text-foreground tabular-nums">
+              {formatNumber(platform.messages)}
+            </span>
           </div>
         ))}
       </div>
     </div>
   );
-}
+});

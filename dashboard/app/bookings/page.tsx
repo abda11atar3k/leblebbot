@@ -247,7 +247,7 @@ export default function BookingsPage() {
                   key={status}
                   onClick={() => setStatusFilter(status)}
                   className={cn(
-                    "px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap transition-all",
+                    "px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap transition-colors duration-150",
                     statusFilter === status
                       ? status === "all" 
                         ? "bg-primary text-white" 

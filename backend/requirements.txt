@@ -1,11 +1,44 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-groq
-chromadb
-motor
-redis
-aiohttp
-python-multipart
-python-jose
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Data Validation
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# AI
+groq==0.4.2
+
+# Vector Database
+chromadb==0.4.22
+sentence-transformers==2.3.1
+
+# Pin numpy for chromadb compatibility
+numpy<2.0.0
+
+# MongoDB
+motor==3.3.2
+pymongo==4.6.1
+
+# Redis
+redis==5.0.1
+aioredis==2.0.1
+
+# HTTP Client
+aiohttp==3.9.1
+httpx==0.26.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2024.1
+
+# WebSocket
+websockets==12.0
+
+# Async
+asyncio-throttle==1.0.2

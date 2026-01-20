@@ -154,7 +154,7 @@ export default function LandingPage() {
               <div
                 key={feature.title}
                 className={cn(
-                  "group p-6 bg-surface border border-border rounded-2xl hover:border-primary/50 hover:shadow-soft-lg transition-all duration-300",
+                  "group p-6 bg-surface border border-border rounded-2xl hover:border-primary/50 hover:shadow-soft-lg transition-[border-color,box-shadow] duration-200",
                   isRTL ? "text-end" : "text-start"
                 )}
               >

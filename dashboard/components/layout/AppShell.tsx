@@ -18,7 +18,7 @@ export default function AppShell({ children, title, description }: AppShellProps
     <div className="min-h-screen bg-background">
       <Sidebar />
       <div className={cn(
-        "transition-all duration-300",
+        "transition-[padding] duration-200",
         isRTL ? "pr-64" : "pl-64"
       )}>
         <Header title={title} description={description} />

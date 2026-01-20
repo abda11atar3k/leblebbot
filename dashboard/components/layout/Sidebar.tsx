@@ -132,7 +132,7 @@ export default function Sidebar() {
                 item.href === "/settings" ? "settings" : undefined
               }
               className={cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all",
+                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150",
                 isActive
                   ? "bg-primary text-white shadow-soft"
                   : "text-muted hover:text-foreground hover:bg-surface-elevated",
@@ -184,10 +184,10 @@ export default function Sidebar() {
             <span className="text-sm font-semibold text-foreground">{t("sidebar.upgradeToPro")}</span>
           </div>
           <p className={cn("text-xs text-muted mb-3", isRTL ? "text-end" : "text-start")}>
-            {isRTL ? "احصل على ميزات متقدمة" : "Get advanced features"}
+            {t("sidebar.getAdvancedFeatures")}
           </p>
           <button className="w-full py-2 px-3 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-700 transition-colors shadow-soft">
-            {isRTL ? "ترقية الآن" : "Upgrade Now"}
+            {t("sidebar.upgradeNow")}
           </button>
         </div>
       </div>

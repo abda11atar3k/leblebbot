@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import AppShell from "@/components/layout/AppShell";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "@/lib/i18n";
@@ -8,150 +8,142 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { IntegrationCard, Integration } from "@/components/settings/IntegrationCard";
+import {
+  fetchIntegrations,
+  fetchCategories,
+  connectIntegration,
+  disconnectIntegration,
+  updateIntegrationSettings,
+  testIntegration,
+  openOAuthPopup,
+  Category,
+} from "@/lib/api/integrations";
 import { 
-  Calendar,
-  FileSpreadsheet,
-  MessageSquare,
-  Settings,
   Check,
-  X,
-  ExternalLink,
-  RefreshCw,
-  Key,
-  Link,
-  Unlink,
-  Bell,
+  Zap,
   Shield,
-  Zap
+  Key,
+  RefreshCw,
+  Bell,
+  Search,
+  FileSpreadsheet,
+  Calendar,
+  Mail,
+  MessageSquare,
+  CreditCard,
+  Banknote,
+  Truck,
+  Layers,
 } from "lucide-react";
 
-interface Integration {
-  id: string;
-  name: string;
-  nameAr: string;
-  description: string;
-  descriptionAr: string;
-  icon: React.ElementType;
-  iconColor: string;
-  connected: boolean;
-  lastSync?: string;
-  features: string[];
-  featuresAr: string[];
-}
-
-const integrations: Integration[] = [
-  {
-    id: "google-calendar",
-    name: "Google Calendar",
-    nameAr: "تقويم جوجل",
-    description: "Sync bookings automatically with Google Calendar",
-    descriptionAr: "مزامنة الحجوزات تلقائياً مع تقويم جوجل",
-    icon: Calendar,
-    iconColor: "text-blue-500",
-    connected: false,
-    features: [
-      "Auto-create calendar events for bookings",
-      "Two-way sync with Google Calendar",
-      "Send calendar invites to customers",
-      "Set automatic reminders"
-    ],
-    featuresAr: [
-      "إنشاء أحداث تقويم تلقائياً للحجوزات",
-      "مزامنة ثنائية مع تقويم جوجل",
-      "إرسال دعوات التقويم للعملاء",
-      "تعيين تذكيرات تلقائية"
-    ]
-  },
-  {
-    id: "google-sheets",
-    name: "Google Sheets",
-    nameAr: "جداول بيانات جوجل",
-    description: "Export data and analytics to Google Sheets",
-    descriptionAr: "تصدير البيانات والتحليلات إلى جداول بيانات جوجل",
-    icon: FileSpreadsheet,
-    iconColor: "text-green-500",
-    connected: false,
-    features: [
-      "Auto-log orders to spreadsheet",
-      "Export booking records",
-      "Daily analytics reports",
-      "Custom data exports"
-    ],
-    featuresAr: [
-      "تسجيل الطلبات تلقائياً في الجدول",
-      "تصدير سجلات الحجوزات",
-      "تقارير تحليلية يومية",
-      "تصدير بيانات مخصصة"
-    ]
-  },
-  {
-    id: "whatsapp-notifications",
-    name: "WhatsApp Notifications",
-    nameAr: "إشعارات واتساب",
-    description: "Send instant notifications via WhatsApp",
-    descriptionAr: "إرسال إشعارات فورية عبر واتساب",
-    icon: MessageSquare,
-    iconColor: "text-whatsapp",
-    connected: true,
-    lastSync: "منذ دقيقتين",
-    features: [
-      "New order alerts to admin",
-      "Order status updates to customers",
-      "Booking reminders",
-      "Follow-up messages"
-    ],
-    featuresAr: [
-      "تنبيهات الطلبات الجديدة للإدارة",
-      "تحديثات حالة الطلب للعملاء",
-      "تذكيرات الحجوزات",
-      "رسائل المتابعة"
-    ]
-  }
-];
+// Category icons
+const categoryIcons: Record<string, React.ElementType> = {
+  google: Layers,
+  messaging: MessageSquare,
+  payment: CreditCard,
+  shipping: Truck,
+};
 
 export default function IntegrationsPage() {
-  const { isRTL } = useTranslation();
-  const [integrationsState, setIntegrationsState] = useState(integrations);
-  const [connecting, setConnecting] = useState<string | null>(null);
+  const { t, isRTL } = useTranslation();
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  const handleConnect = async (integrationId: string) => {
-    setConnecting(integrationId);
-    // Simulate connection process
-    await new Promise(resolve => setTimeout(resolve, 2000));
+  // Load integrations and categories
+  useEffect(() => {
+    async function loadData() {
+      setLoading(true);
+      const [integrationsData, categoriesData] = await Promise.all([
+        fetchIntegrations(),
+        fetchCategories(),
+      ]);
+      setIntegrations(integrationsData);
+      setCategories(categoriesData);
+      setLoading(false);
+    }
+    loadData();
+  }, []);
+
+  // Filter integrations
+  const filteredIntegrations = integrations.filter((integration) => {
+    const matchesCategory = !selectedCategory || integration.category === selectedCategory;
+    const matchesSearch = !searchQuery || 
+      integration.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      integration.name_ar.includes(searchQuery);
+    return matchesCategory && matchesSearch;
+  });
+
+  // Stats
+  const connectedCount = integrations.filter((i) => i.status.connected).length;
+  const availableCount = integrations.filter((i) => !i.status.connected).length;
+
+  // Handlers
+  const handleConnect = useCallback(async (id: string) => {
+    const result = await connectIntegration(id);
     
-    setIntegrationsState(prev => prev.map(int => 
-      int.id === integrationId 
-        ? { ...int, connected: true, lastSync: isRTL ? "الآن" : "Just now" }
-        : int
-    ));
-    setConnecting(null);
-  };
+    if (result.status === "oauth_required" && result.oauth_url) {
+      openOAuthPopup(result.oauth_url, async () => {
+        // Refresh integrations after OAuth
+        const updated = await fetchIntegrations();
+        setIntegrations(updated);
+      });
+    } else {
+      // Update local state
+      setIntegrations((prev) =>
+        prev.map((i) =>
+          i.id === id
+            ? { ...i, status: { ...i.status, connected: true, last_sync: "الآن" } }
+            : i
+        )
+      );
+    }
+  }, []);
 
-  const handleDisconnect = (integrationId: string) => {
-    setIntegrationsState(prev => prev.map(int => 
-      int.id === integrationId 
-        ? { ...int, connected: false, lastSync: undefined }
-        : int
-    ));
-  };
+  const handleDisconnect = useCallback(async (id: string) => {
+    await disconnectIntegration(id);
+    setIntegrations((prev) =>
+      prev.map((i) =>
+        i.id === id
+          ? { ...i, status: { ...i.status, connected: false, last_sync: null } }
+          : i
+      )
+    );
+  }, []);
+
+  const handleUpdateSettings = useCallback(async (id: string, settings: Record<string, any>) => {
+    await updateIntegrationSettings(id, settings);
+    setIntegrations((prev) =>
+      prev.map((i) =>
+        i.id === id
+          ? { ...i, config: { ...i.config, settings: { ...i.config.settings, ...settings } } }
+          : i
+      )
+    );
+  }, []);
+
+  const handleTest = useCallback(async (id: string) => {
+    return await testIntegration(id);
+  }, []);
 
   return (
-    <AppShell 
-      title={isRTL ? "التكاملات" : "Integrations"} 
-      description={isRTL ? "ربط LeblebBot مع خدماتك المفضلة" : "Connect LeblebBot with your favorite services"}
+    <AppShell
+      title={t("integrations.title")}
+      description={t("integrations.description")}
     >
-      {/* Quick Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+      {/* Stats Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
         <div className="bg-surface border border-border rounded-xl p-4 shadow-soft">
           <div className={cn("flex items-center gap-3", isRTL && "flex-row-reverse")}>
             <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center">
               <Check className="w-5 h-5 text-success" />
             </div>
             <div className={isRTL ? "text-end" : "text-start"}>
-              <p className="text-2xl font-bold text-foreground">
-                {integrationsState.filter(i => i.connected).length}
-              </p>
-              <p className="text-sm text-muted">{isRTL ? "متصل" : "Connected"}</p>
+              <p className="text-2xl font-bold text-foreground tabular-nums">{connectedCount}</p>
+              <p className="text-sm text-muted">{t("integrations.connected")}</p>
             </div>
           </div>
         </div>
@@ -162,10 +154,8 @@ export default function IntegrationsPage() {
               <Zap className="w-5 h-5 text-muted" />
             </div>
             <div className={isRTL ? "text-end" : "text-start"}>
-              <p className="text-2xl font-bold text-foreground">
-                {integrationsState.filter(i => !i.connected).length}
-              </p>
-              <p className="text-sm text-muted">{isRTL ? "متاح" : "Available"}</p>
+              <p className="text-2xl font-bold text-foreground tabular-nums">{availableCount}</p>
+              <p className="text-sm text-muted">{t("integrations.available")}</p>
             </div>
           </div>
         </div>
@@ -177,144 +167,103 @@ export default function IntegrationsPage() {
             </div>
             <div className={isRTL ? "text-end" : "text-start"}>
               <p className="text-2xl font-bold text-foreground">100%</p>
-              <p className="text-sm text-muted">{isRTL ? "آمن" : "Secure"}</p>
+              <p className="text-sm text-muted">{t("integrations.secure")}</p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Integrations Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {integrationsState.map((integration) => {
-          const Icon = integration.icon;
-          const isConnecting = connecting === integration.id;
+      {/* Filter Bar */}
+      <div className={cn(
+        "flex flex-col sm:flex-row gap-4 mb-6",
+        isRTL && "sm:flex-row-reverse"
+      )}>
+        {/* Search */}
+        <div className="relative flex-1">
+          <Search className={cn(
+            "absolute top-1/2 -translate-y-1/2 w-4 h-4 text-muted",
+            isRTL ? "right-3" : "left-3"
+          )} />
+          <Input
+            placeholder={t("integrations.search")}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className={cn(isRTL ? "pr-10" : "pl-10")}
+          />
+        </div>
 
-          return (
-            <Card key={integration.id} variant={integration.connected ? "elevated" : "default"}>
-              <CardHeader>
-                <div className={cn(
-                  "flex items-start justify-between",
-                  isRTL && "flex-row-reverse"
-                )}>
-                  <div className={cn("flex items-center gap-3", isRTL && "flex-row-reverse")}>
-                    <div className={cn(
-                      "w-12 h-12 rounded-xl flex items-center justify-center",
-                      integration.connected ? "bg-success/10" : "bg-surface-elevated"
-                    )}>
-                      <Icon className={cn("w-6 h-6", integration.iconColor)} />
-                    </div>
-                    <div className={isRTL ? "text-end" : "text-start"}>
-                      <CardTitle className="text-lg">
-                        {isRTL ? integration.nameAr : integration.name}
-                      </CardTitle>
-                      <CardDescription className="mt-1">
-                        {isRTL ? integration.descriptionAr : integration.description}
-                      </CardDescription>
-                    </div>
-                  </div>
-                  <Badge 
-                    variant={integration.connected ? "success" : "secondary"}
-                    className={cn(
-                      "flex items-center gap-1",
-                      isRTL && "flex-row-reverse"
-                    )}
-                  >
-                    {integration.connected ? (
-                      <>
-                        <Check className="w-3 h-3" />
-                        {isRTL ? "متصل" : "Connected"}
-                      </>
-                    ) : (
-                      <>
-                        <X className="w-3 h-3" />
-                        {isRTL ? "غير متصل" : "Not Connected"}
-                      </>
-                    )}
-                  </Badge>
-                </div>
-              </CardHeader>
-
-              <CardContent className="space-y-4">
-                {/* Features List */}
-                <div className="space-y-2">
-                  <p className={cn(
-                    "text-xs font-semibold text-muted",
-                    isRTL && "text-end"
-                  )}>
-                    {isRTL ? "المميزات" : "Features"}
-                  </p>
-                  <ul className="space-y-1.5">
-                    {(isRTL ? integration.featuresAr : integration.features).map((feature, index) => (
-                      <li 
-                        key={index}
-                        className={cn(
-                          "flex items-center gap-2 text-sm text-muted",
-                          isRTL && "flex-row-reverse"
-                        )}
-                      >
-                        <Check className="w-3 h-3 text-success flex-shrink-0" />
-                        <span>{feature}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* Last Sync */}
-                {integration.connected && integration.lastSync && (
-                  <div className={cn(
-                    "flex items-center gap-2 text-xs text-muted p-2 bg-surface-elevated rounded-lg",
-                    isRTL && "flex-row-reverse"
-                  )}>
-                    <RefreshCw className="w-3 h-3" />
-                    <span>{isRTL ? "آخر مزامنة:" : "Last sync:"} {integration.lastSync}</span>
-                  </div>
-                )}
-
-                {/* Actions */}
-                <div className={cn(
-                  "flex items-center gap-2 pt-2",
-                  isRTL && "flex-row-reverse"
-                )}>
-                  {integration.connected ? (
-                    <>
-                      <Button variant="secondary" size="sm">
-                        <Settings className="w-4 h-4" />
-                        {isRTL ? "الإعدادات" : "Settings"}
-                      </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="sm"
-                        onClick={() => handleDisconnect(integration.id)}
-                      >
-                        <Unlink className="w-4 h-4" />
-                        {isRTL ? "قطع الاتصال" : "Disconnect"}
-                      </Button>
-                    </>
-                  ) : (
-                    <Button 
-                      size="sm"
-                      onClick={() => handleConnect(integration.id)}
-                      disabled={isConnecting}
-                    >
-                      {isConnecting ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          {isRTL ? "جاري الاتصال..." : "Connecting..."}
-                        </>
-                      ) : (
-                        <>
-                          <Link className="w-4 h-4" />
-                          {isRTL ? "اتصال" : "Connect"}
-                        </>
-                      )}
-                    </Button>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+        {/* Category Filter */}
+        <div className={cn("flex gap-2 overflow-x-auto pb-1", isRTL && "flex-row-reverse")}>
+          <Button
+            variant={selectedCategory === null ? "primary" : "secondary"}
+            size="sm"
+            onClick={() => setSelectedCategory(null)}
+          >
+            {t("integrations.all")}
+          </Button>
+          {categories.map((category) => {
+            const Icon = categoryIcons[category.id] || Layers;
+            return (
+              <Button
+                key={category.id}
+                variant={selectedCategory === category.id ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => setSelectedCategory(category.id)}
+                className={cn("flex items-center gap-2 whitespace-nowrap", isRTL && "flex-row-reverse")}
+              >
+                <Icon className="w-4 h-4" />
+                {isRTL ? category.name_ar : category.name}
+              </Button>
+            );
+          })}
+        </div>
       </div>
+
+      {/* Integrations Grid */}
+      {loading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="bg-surface border border-border rounded-xl p-5 animate-pulse">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 rounded-xl bg-surface-elevated" />
+                <div className="flex-1">
+                  <div className="h-4 bg-surface-elevated rounded w-24 mb-2" />
+                  <div className="h-3 bg-surface-elevated rounded w-32" />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="h-3 bg-surface-elevated rounded" />
+                <div className="h-3 bg-surface-elevated rounded w-3/4" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : filteredIntegrations.length === 0 ? (
+        <div className="text-center py-12">
+          <div className="w-16 h-16 rounded-full bg-surface-elevated flex items-center justify-center mx-auto mb-4">
+            <Search className="w-8 h-8 text-muted" />
+          </div>
+          <p className="text-lg font-medium text-foreground mb-1">
+            {t("integrations.noResults")}
+          </p>
+          <p className="text-sm text-muted">
+            {t("integrations.tryDifferent")}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filteredIntegrations.map((integration) => (
+            <IntegrationCard
+              key={integration.id}
+              integration={integration}
+              onConnect={handleConnect}
+              onDisconnect={handleDisconnect}
+              onUpdateSettings={handleUpdateSettings}
+              onTest={handleTest}
+            />
+          ))}
+        </div>
+      )}
 
       {/* API Keys Section */}
       <div className="mt-8">
@@ -325,39 +274,27 @@ export default function IntegrationsPage() {
                 <Key className="w-5 h-5 text-primary" />
               </div>
               <div className={isRTL ? "text-end" : "text-start"}>
-                <CardTitle>{isRTL ? "مفاتيح API" : "API Keys"}</CardTitle>
-                <CardDescription>
-                  {isRTL 
-                    ? "إدارة مفاتيح API للتكاملات المخصصة" 
-                    : "Manage API keys for custom integrations"}
-                </CardDescription>
+                <CardTitle>{t("integrations.apiKeys")}</CardTitle>
+                <CardDescription>{t("integrations.apiKeysDescription")}</CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className={cn(
-              "flex items-center gap-4",
-              isRTL && "flex-row-reverse"
-            )}>
-              <Input 
+            <div className={cn("flex items-center gap-4", isRTL && "flex-row-reverse")}>
+              <Input
                 value="lbb_sk_xxxxxxxxxxxxxxxxxxxxxxxxxx"
                 readOnly
                 className="flex-1 font-mono text-sm"
               />
               <Button variant="secondary" size="sm">
-                {isRTL ? "نسخ" : "Copy"}
+                {t("integrations.copy")}
               </Button>
               <Button variant="ghost" size="sm">
                 <RefreshCw className="w-4 h-4" />
               </Button>
             </div>
-            <p className={cn(
-              "text-xs text-muted",
-              isRTL && "text-end"
-            )}>
-              {isRTL 
-                ? "احتفظ بمفتاح API الخاص بك سرياً. لا تشاركه مع أي شخص."
-                : "Keep your API key secret. Never share it with anyone."}
+            <p className={cn("text-xs text-muted", isRTL && "text-end")}>
+              {t("integrations.apiKeyWarning")}
             </p>
           </CardContent>
         </Card>
@@ -372,12 +309,8 @@ export default function IntegrationsPage() {
                 <Bell className="w-5 h-5 text-warning" />
               </div>
               <div className={isRTL ? "text-end" : "text-start"}>
-                <CardTitle>{isRTL ? "Webhooks" : "Webhooks"}</CardTitle>
-                <CardDescription>
-                  {isRTL 
-                    ? "استقبال إشعارات فورية عند حدوث أحداث معينة" 
-                    : "Receive real-time notifications when events occur"}
-                </CardDescription>
+                <CardTitle>{t("integrations.webhooks")}</CardTitle>
+                <CardDescription>{t("integrations.webhooksDescription")}</CardDescription>
               </div>
             </div>
           </CardHeader>
@@ -386,29 +319,26 @@ export default function IntegrationsPage() {
               "flex flex-col sm:flex-row items-start sm:items-center gap-4",
               isRTL && "sm:flex-row-reverse"
             )}>
-              <Input 
-                placeholder={isRTL ? "https://your-server.com/webhook" : "https://your-server.com/webhook"}
+              <Input
+                placeholder="https://your-server.com/webhook"
                 className="flex-1"
               />
-              <Button>{isRTL ? "حفظ" : "Save"}</Button>
+              <Button>{t("integrations.save")}</Button>
             </div>
-            <div className={cn(
-              "flex flex-wrap gap-2",
-              isRTL && "flex-row-reverse justify-end"
-            )}>
+            <div className={cn("flex flex-wrap gap-2", isRTL && "flex-row-reverse justify-end")}>
               {[
-                { id: "orders", label: isRTL ? "الطلبات" : "Orders" },
-                { id: "bookings", label: isRTL ? "الحجوزات" : "Bookings" },
-                { id: "conversations", label: isRTL ? "المحادثات" : "Conversations" },
+                { id: "orders", label: t("integrations.orders") },
+                { id: "bookings", label: t("integrations.bookings") },
+                { id: "conversations", label: t("integrations.conversations") },
               ].map((event) => (
-                <label 
+                <label
                   key={event.id}
                   className={cn(
-                    "flex items-center gap-2 px-3 py-1.5 bg-surface-elevated rounded-lg cursor-pointer",
+                    "flex items-center gap-2 px-3 py-1.5 bg-surface-elevated rounded-lg cursor-pointer transition-colors hover:bg-surface",
                     isRTL && "flex-row-reverse"
                   )}
                 >
-                  <input type="checkbox" defaultChecked className="rounded" />
+                  <input type="checkbox" defaultChecked className="rounded border-border" />
                   <span className="text-sm text-foreground">{event.label}</span>
                 </label>
               ))}
