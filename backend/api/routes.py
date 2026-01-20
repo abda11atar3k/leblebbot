@@ -35,6 +35,35 @@ _contacts_cache: Dict[str, Any] = {
 # Messages cache (refreshes every 30 seconds per chat)
 _messages_cache: Dict[str, Dict[str, Any]] = {}
 
+# Group names cache (refreshes every 5 minutes)
+_group_names_cache: Dict[str, Any] = {
+    "data": {},
+    "timestamp": 0,
+    "ttl": 300  # 5 minutes
+}
+
+async def get_group_name(group_jid: str) -> Optional[str]:
+    """Get the real name (subject) of a group with caching."""
+    global _group_names_cache
+    
+    # Check cache first
+    if group_jid in _group_names_cache["data"]:
+        return _group_names_cache["data"][group_jid]
+    
+    # Fetch from API
+    try:
+        evolution_service = get_evolution_service()
+        group_info = await evolution_service.get_group_info(group_jid)
+        if group_info:
+            subject = group_info.get("subject")
+            if subject:
+                _group_names_cache["data"][group_jid] = subject
+                return subject
+    except Exception as e:
+        logger.warning(f"Failed to fetch group info for {group_jid}: {e}")
+    
+    return None
+
 async def get_cached_contacts() -> Dict[str, Any]:
     """Get contacts with caching to avoid repeated API calls."""
     global _contacts_cache
@@ -61,6 +90,7 @@ async def get_cached_contacts() -> Dict[str, Any]:
             
         contact_data = {
             "name": name,
+            "subject": contact.get("subject") or None,
             "profile_pic": contact.get("profilePicUrl"),
             "is_group": contact.get("isGroup", False) or contact.get("type") == "group"
         }
@@ -532,6 +562,7 @@ def clean_phone_number(jid: str) -> str:
     """
     Clean phone number from JID format.
     Removes @lid, @s.whatsapp.net, @g.us suffixes and handles group IDs.
+    Returns empty string if the number is too long to be a real phone number.
     """
     # Remove suffixes
     phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "").replace("@lid", "")
@@ -557,7 +588,13 @@ def clean_phone_number(jid: str) -> str:
         # Another common @lid prefix
         phone = phone[2:]
     
-    # For other very long numbers, take last 12 digits
+    # For other very long numbers (> 15 digits), it's likely an internal ID
+    # Real phone numbers are max 15 digits (including country code)
+    # Return empty to signal this is not a real phone number
+    if len(phone) > 15:
+        return ""
+    
+    # For moderately long numbers (13-15), take last 12 digits
     elif len(phone) > 13:
         phone = phone[-12:]
     
@@ -593,6 +630,15 @@ async def get_whatsapp_chats(
     except Exception:
         pass
     
+    # First pass: collect all phone numbers that have @s.whatsapp.net chats
+    # This helps us filter out @lid duplicates
+    phones_with_normal_jid = set()
+    for chat in chats:
+        remote_jid = chat.get("remoteJid", "")
+        if "@s.whatsapp.net" in remote_jid:
+            phone = clean_phone_number(remote_jid)
+            phones_with_normal_jid.add(phone)
+    
     # Deduplicate by remoteJid using dict
     seen_jids = {}
     
@@ -616,6 +662,11 @@ async def get_whatsapp_chats(
         is_lid = "@lid" in remote_jid
         phone = clean_phone_number(remote_jid)
         
+        # Skip all @lid chats - they are internal WhatsApp IDs that often duplicate
+        # the @s.whatsapp.net chats and don't contain real phone numbers
+        if is_lid:
+            continue
+        
         # Get name - improved logic with multiple fallbacks
         contact_info = contacts_map.get(remote_jid, {})
         if not contact_info:
@@ -623,14 +674,20 @@ async def get_whatsapp_chats(
             contact_info = contacts_map.get(phone, {})
         
         if is_group:
-            # For groups, prioritize group-specific fields in order
-            name = (
-                chat.get("subject") or              # Group subject (PRIMARY - best source)
-                contact_info.get("name") or 
-                chat.get("name") or 
-                chat.get("pushName") or 
-                f"مجموعة {phone[-4:]}"             # Arabic "Group" with shorter ID
-            )
+            # For groups, ALWAYS fetch the real group subject from API first
+            # This is the most reliable source for group names
+            real_group_name = await get_group_name(remote_jid)
+            
+            if real_group_name:
+                name = real_group_name
+            else:
+                # Fallback to other sources only if API didn't return a name
+                contact_group_name = contact_info.get("subject") or contact_info.get("name")
+                name = (
+                    chat.get("subject") or              # Group subject
+                    contact_group_name or 
+                    f"مجموعة {phone[-4:]}"              # Final fallback
+                )
         else:
             # For individuals, try multiple name fields in priority order
             name = (
@@ -750,20 +807,22 @@ async def get_whatsapp_chats(
 async def get_whatsapp_chat_messages(
     remote_jid: str,
     limit: int = Query(50, le=200),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     force_refresh: bool = Query(False, description="Force refresh from API")
 ):
     """
     Get messages for a specific WhatsApp chat from Evolution API.
     Enhanced with sender info for groups and media URLs via proxy.
     Uses cached contacts and messages for faster loading.
+    Supports pagination via page parameter.
     """
     global _messages_cache
     
     # URL decode the remote_jid (it might be encoded)
     remote_jid = unquote(remote_jid)
     
-    # Check messages cache (30 second TTL)
-    cache_key = f"{remote_jid}:{limit}"
+    # Check messages cache (30 second TTL) - include page in cache key
+    cache_key = f"{remote_jid}:{limit}:{page}"
     current_time = time.time()
     
     if not force_refresh and cache_key in _messages_cache:
@@ -775,9 +834,9 @@ async def get_whatsapp_chat_messages(
     is_group = "@g.us" in remote_jid
     is_lid = "@lid" in remote_jid
     
-    # Only fetch contacts for groups (for sender name resolution)
+    # Fetch contacts for both groups and 1:1 (avatar/name resolution)
     # Uses cache to avoid slow repeated API calls
-    contacts_map = await get_cached_contacts() if is_group else {}
+    contacts_map = await get_cached_contacts()
     
     # For @lid chats, get owner JID to fix fromMe detection
     owner_jid = None
@@ -794,12 +853,41 @@ async def get_whatsapp_chat_messages(
         except Exception:
             pass
     
-    # Get messages from Evolution API
-    messages = await evolution_service.get_messages(remote_jid, limit=limit)
+    # Get messages from Evolution API with pagination
+    messages_data = await evolution_service.get_messages(remote_jid, limit=limit, page=page)
+    messages = messages_data.get("records", [])
+    messages_total = messages_data.get("total", len(messages))
     
     # Track seen message IDs to prevent duplicates
     seen_ids = set()
     result = []
+    
+    # For groups, fetch participants to get the @lid to phone number mapping
+    # This is the most reliable source for real phone numbers
+    group_participants_map = {}
+    if is_group:
+        try:
+            participants = await evolution_service.get_group_participants(remote_jid)
+            for p in participants:
+                lid_id = p.get("id", "")
+                phone_number = p.get("phoneNumber", "")
+                if lid_id and phone_number:
+                    group_participants_map[lid_id] = phone_number
+        except Exception as e:
+            logger.warning(f"Failed to fetch group participants: {e}")
+    
+    # First pass: build a mapping from @lid to real phone number using participantAlt
+    # This helps us resolve @lid participants even in older messages
+    lid_to_phone_map = {}
+    for msg in messages:
+        key = msg.get("key", {})
+        participant_lid = key.get("participant", "")
+        participant_alt = key.get("participantAlt", "")
+        if participant_lid and "@lid" in participant_lid and participant_alt and "@s.whatsapp.net" in participant_alt:
+            lid_to_phone_map[participant_lid] = participant_alt
+    
+    # Merge group_participants_map into lid_to_phone_map (group participants take precedence)
+    lid_to_phone_map.update(group_participants_map)
     
     for msg in messages:
         key = msg.get("key", {})
@@ -839,6 +927,32 @@ async def get_whatsapp_chat_messages(
             message_data.get("videoMessage", {}).get("caption") or
             ""
         )
+        
+        # Clean up mentions in content - replace @lid IDs with proper names
+        # Pattern: @119322932424873 or similar long number mentions
+        import re
+        if content:
+            # Find all @ mentions with numbers (potential @lid references)
+            mention_pattern = r'@(\d{10,})'
+            matches = re.findall(mention_pattern, content)
+            for match in matches:
+                # Check if this is a long internal ID (> 15 digits)
+                if len(match) > 15:
+                    # Replace with @مشارك
+                    content = content.replace(f'@{match}', '@مشارك')
+                else:
+                    # Try to find a proper name for this number
+                    lid_jid = f'{match}@lid'
+                    if lid_jid in lid_to_phone_map:
+                        # Get the real phone number
+                        real_phone = lid_to_phone_map[lid_jid].replace('@s.whatsapp.net', '')
+                        # Try to get contact name for this phone
+                        contact = contacts_map.get(real_phone, {})
+                        name = contact.get("name", "")
+                        if name and not name.isdigit():
+                            content = content.replace(f'@{match}', f'@{name}')
+                        else:
+                            content = content.replace(f'@{match}', f'@{real_phone}')
         
         # Determine message type and extract media info
         msg_type = "text"
@@ -905,10 +1019,26 @@ async def get_whatsapp_chat_messages(
         sender_name = push_name
         sender_jid = None
         sender_pic = None
+        delivery_status = msg.get("ack")
+        if delivery_status is None:
+            delivery_status = msg.get("status")
         
         if is_group and not from_me:
             # Get participant info for group messages
-            participant = key.get("participant") or key.get("participantAlt")
+            # Prefer participantAlt (real phone number) over participant (@lid internal ID)
+            participant_lid = key.get("participant", "")
+            participant_alt = key.get("participantAlt", "")
+            
+            # If participantAlt is missing, try to get it from our mapping
+            if not participant_alt and participant_lid and participant_lid in lid_to_phone_map:
+                participant_alt = lid_to_phone_map[participant_lid]
+            
+            # Use participantAlt if it's a real phone number (@s.whatsapp.net)
+            if participant_alt and "@s.whatsapp.net" in participant_alt:
+                participant = participant_alt
+            else:
+                participant = participant_lid or participant_alt
+            
             if participant:
                 sender_jid = participant
                 
@@ -918,12 +1048,20 @@ async def get_whatsapp_chat_messages(
                 # For @lid JIDs, the pushName from message is usually the best source
                 # Only look up contacts if pushName is empty, generic, or just a LID number
                 if not sender_name or sender_name in ["Você", "You", "أنت", "Yo"] or is_lid_name:
-                    # Try contact lookup
-                    contact_info = contacts_map.get(participant, {})
+                    # Try contact lookup - first with participantAlt (real phone)
+                    contact_info = {}
+                    if participant_alt:
+                        contact_info = contacts_map.get(participant_alt, {})
+                        if not contact_info:
+                            clean_alt = clean_phone_number(participant_alt)
+                            contact_info = contacts_map.get(clean_alt, {})
+                    
+                    # Fallback to participant lookup
                     if not contact_info:
-                        # Try with cleaned phone
-                        clean_p = clean_phone_number(participant)
-                        contact_info = contacts_map.get(clean_p, {})
+                        contact_info = contacts_map.get(participant, {})
+                        if not contact_info:
+                            clean_p = clean_phone_number(participant)
+                            contact_info = contacts_map.get(clean_p, {})
                     
                     contact_name = contact_info.get("name", "")
                     # Only use contact name if it's not a number
@@ -931,14 +1069,39 @@ async def get_whatsapp_chat_messages(
                         sender_name = contact_name
                     sender_pic = contact_info.get("profile_pic")
                 
-                # If still no usable name, create a friendly placeholder
+                # If still no usable name, show the real phone number
                 if not sender_name or sender_name in ["Você", "You", "أنت", "Yo"] or (sender_name.isdigit() and len(sender_name) > 10):
-                    # Use a friendly name with last 4 digits
-                    clean_p = clean_phone_number(participant)
-                    if clean_p and len(clean_p) >= 4:
-                        sender_name = f"مستخدم {clean_p[-4:]}"
+                    # First try participantAlt (real phone number from Evolution API)
+                    if participant_alt and "@s.whatsapp.net" in participant_alt:
+                        clean_p = clean_phone_number(participant_alt)
+                        # Only use if clean_p is valid (not empty - means it's a real phone number)
+                        if clean_p:
+                            sender_name = clean_p
+                        elif push_name and not is_lid_name:
+                            # Fallback to pushName if clean_p is empty (internal ID)
+                            sender_name = push_name
+                        else:
+                            sender_name = "مشارك"
+                    elif "@s.whatsapp.net" in participant:
+                        clean_p = clean_phone_number(participant)
+                        # Only use if clean_p is valid (not empty - means it's a real phone number)
+                        if clean_p:
+                            sender_name = clean_p
+                        elif push_name and not is_lid_name:
+                            # Fallback to pushName if clean_p is empty (internal ID)
+                            sender_name = push_name
+                        else:
+                            sender_name = "مشارك"
                     else:
-                        sender_name = "مستخدم"
+                        # No real phone available - use pushName if valid
+                        if push_name and not is_lid_name:
+                            sender_name = push_name
+                        else:
+                            sender_name = "مشارك"
+                
+                # Final safety check: if sender_name still contains @lid or is a very long number, use "مشارك"
+                if sender_name and ("@lid" in sender_name or (sender_name.replace("@", "").isdigit() and len(sender_name) > 15)):
+                    sender_name = "مشارك"
         
         result.append({
             "id": msg_id,
@@ -948,6 +1111,7 @@ async def get_whatsapp_chat_messages(
             "sender_name": sender_name,
             "sender_jid": sender_jid,
             "sender_pic": sender_pic,
+            "status": delivery_status,
             "type": msg_type,
             "media_url": media_url,
             "media_mimetype": media_mimetype,
@@ -966,23 +1130,30 @@ async def get_whatsapp_chat_messages(
     if not contact_info:
         contact_info = contacts_map.get(phone, {})
     
-    chat_name = contact_info.get("name")
+    chat_name = None
     chat_pic = contact_info.get("profile_pic")
     
-    # Skip self-reference names
-    if chat_name in ["Você", "You", "أنت", "Yo"]:
-        chat_name = None
-    
-    # Final fallback - generate readable name
-    if not chat_name:
-        if is_group:
-            chat_name = f"مجموعة {phone[-6:]}" if len(phone) > 6 else f"مجموعة {phone}"
+    if is_group:
+        # For groups, ALWAYS fetch the real group subject from API first
+        real_group_name = await get_group_name(remote_jid)
+        if real_group_name:
+            chat_name = real_group_name
         else:
+            # Fallback to contact info
+            chat_name = contact_info.get("subject") or contact_info.get("name")
+            if not chat_name or chat_name in ["Você", "You", "أنت", "Yo"]:
+                chat_name = f"مجموعة {phone[-6:]}" if len(phone) > 6 else f"مجموعة {phone}"
+    else:
+        chat_name = contact_info.get("name")
+        # Skip self-reference names
+        if chat_name in ["Você", "You", "أنت", "Yo"]:
+            chat_name = None
+        if not chat_name:
             chat_name = phone
     
     response_data = {
         "items": result,
-        "total": len(result),
+        "total": messages_total,
         "chat": {
             "remote_jid": remote_jid,
             "phone": phone,

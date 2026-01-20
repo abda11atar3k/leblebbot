@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Search, RefreshCw, Ban, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "@/lib/i18n";
+import { formatPhoneE164, isPhoneLike } from "@/lib/formatters/phone";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -61,22 +62,7 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
   // Format phone number for display
   const formatPhoneForDisplay = (phone: string): string => {
     if (!phone) return phone;
-    
-    // If international number (11+ digits), format as +XX XXX XXX XXXX
-    if (phone.length >= 11) {
-      // Format as country code + groups of 3-4
-      const country = phone.slice(0, -10);
-      const first = phone.slice(-10, -7);
-      const second = phone.slice(-7, -4);
-      const third = phone.slice(-4);
-      
-      if (country) {
-        return `+${country} ${first} ${second} ${third}`;
-      }
-      return `${first} ${second} ${third}`;
-    }
-    
-    return phone;
+    return isPhoneLike(phone) ? formatPhoneE164(phone) : phone;
   };
 
   const loadConversations = useCallback(async () => {
@@ -99,7 +85,7 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
           // If name is just a long number, format it nicely
           let displayName = chat.name;
           const isJustNumber = displayName.replace(/\D/g, '').length === displayName.length;
-          if (isJustNumber && displayName.length > 10) {
+          if ((isJustNumber && displayName.length > 10) || isPhoneLike(displayName)) {
             displayName = formatPhoneForDisplay(displayName);
           }
           
@@ -365,10 +351,13 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
                   "flex items-center justify-between mb-0.5",
                   isRTL && "flex-row-reverse"
                 )}>
-                  <span className={cn(
-                    "font-medium text-foreground truncate text-sm",
-                    conv.isBanned && "text-error"
-                  )}>
+                  <span 
+                    className={cn(
+                      "font-medium text-foreground truncate text-sm",
+                      conv.isBanned && "text-error"
+                    )}
+                    dir={isPhoneLike(conv.name) || conv.name.startsWith("+") ? "ltr" : undefined}
+                  >
                     {conv.name}
                     {conv.isBanned && <Ban className="w-3 h-3 inline ml-1 text-error" />}
                   </span>

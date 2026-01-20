@@ -8,6 +8,7 @@ from connectors.messenger import MessengerConnector
 from connectors.telegram import TelegramConnector
 from services.conversation import ConversationService
 from services.safety_service import SafetyService
+from services.ws_manager import broadcast_event
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,23 @@ async def evolution_global_webhook(request: Request, background_tasks: Backgroun
         # Route to WhatsApp handler
         if event in ["messages.upsert", "connection.update", "qrcode.updated"]:
             return await whatsapp_webhook(request, background_tasks)
+        
+        # Presence/typing updates (if provided by Evolution)
+        if event in ["presence.update", "presence.upsert", "presence.changed", "presence.set"]:
+            data = payload.get("data", {}) or {}
+            remote_jid = (
+                data.get("id")
+                or data.get("remoteJid")
+                or data.get("from")
+                or data.get("chatId")
+            )
+            presence = data.get("presence") or data.get("state") or data.get("type")
+            if remote_jid and presence:
+                await broadcast_event("presence", {
+                    "remote_jid": remote_jid,
+                    "presence": presence
+                })
+            return {"status": "ok", "event": event}
         
         return {"status": "ignored", "event": event}
         

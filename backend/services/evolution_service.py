@@ -216,10 +216,17 @@ class EvolutionService:
     async def get_messages(
         self, 
         remote_jid: str,
-        limit: int = 50
-    ) -> list[dict]:
-        """Get messages for a specific chat"""
-        logger.info(f"Fetching messages for {remote_jid}, limit={limit}")
+        limit: int = 50,
+        page: int = 1
+    ) -> dict:
+        """Get messages for a specific chat. Returns dict with records and total.
+        
+        Args:
+            remote_jid: The WhatsApp JID for the chat
+            limit: Number of messages per page (default 50)
+            page: Page number (1-indexed, default 1)
+        """
+        logger.info(f"Fetching messages for {remote_jid}, limit={limit}, page={page}")
         result = await self._request(
             "POST",
             f"/chat/findMessages/{self.instance_name}",
@@ -229,20 +236,25 @@ class EvolutionService:
                         "remoteJid": remote_jid
                     }
                 },
-                "limit": limit
+                "limit": limit,
+                "page": page
             }
         )
         
         # _request wraps response in {"success": bool, "data": original_response}
-        # Evolution API returns {"messages": {"records": [...]}}
+        # Evolution API returns {"messages": {"records": [...], "total": N}}
         if result.get("success") and result.get("data"):
             data = result["data"]
             messages_data = data.get("messages", {})
             if isinstance(messages_data, dict):
                 records = messages_data.get("records", [])
-                logger.info(f"Found {len(records)} message records")
-                return records if isinstance(records, list) else []
-        return []
+                total = messages_data.get("total", len(records))
+                logger.info(f"Found {len(records)} message records, total={total}")
+                return {
+                    "records": records if isinstance(records, list) else [],
+                    "total": total
+                }
+        return {"records": [], "total": 0}
 
     async def get_recent_conversations(self, limit: int = 20) -> list[dict]:
         """
@@ -340,6 +352,54 @@ class EvolutionService:
                 if records:
                     return records[0]
         return None
+
+    async def get_group_participants(self, group_jid: str) -> list[dict]:
+        """
+        Get participants of a group with their real phone numbers.
+        This maps @lid IDs to actual phone numbers.
+        
+        Args:
+            group_jid: Group JID (e.g., "120363399908392402@g.us")
+            
+        Returns:
+            List of participant dicts with id, phoneNumber, admin, name, imgUrl
+        """
+        result = await self._request(
+            "GET",
+            f"/group/participants/{self.instance_name}?groupJid={group_jid}",
+            timeout=30
+        )
+        
+        if result.get("success") and result.get("data"):
+            data = result["data"]
+            return data.get("participants", [])
+        
+        return []
+
+    async def get_group_info(self, group_jid: str) -> dict:
+        """
+        Get group info including the real group name (subject).
+        
+        Args:
+            group_jid: Group JID (e.g., "120363399908392402@g.us")
+            
+        Returns:
+            Dict with group info including id, subject (name), pictureUrl, etc.
+        """
+        result = await self._request(
+            "GET",
+            f"/group/findGroupInfos/{self.instance_name}?groupJid={group_jid}",
+            timeout=15
+        )
+        
+        if result.get("success") and result.get("data"):
+            return result["data"]
+        
+        # Also check if data is directly in result (some API versions)
+        if result.get("id") and result.get("subject"):
+            return result
+        
+        return {}
 
 
 # Global service instance

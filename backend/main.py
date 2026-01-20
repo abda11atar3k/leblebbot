@@ -1,6 +1,5 @@
 import logging
 from contextlib import asynccontextmanager
-from typing import Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +9,7 @@ from api.webhooks import router as webhook_router
 from api.connectors import router as connector_router
 from api.integrations import router as integrations_router
 from config import get_settings
+from services.ws_manager import manager
 
 # Configure logging
 logging.basicConfig(
@@ -17,43 +17,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-# WebSocket connection manager
-class ConnectionManager:
-    """Manages WebSocket connections for real-time updates"""
-    
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
-        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
-        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
-    
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected = set()
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except:
-                disconnected.add(connection)
-        
-        # Remove disconnected
-        self.active_connections -= disconnected
-    
-    async def send_to_user(self, user_id: str, message: dict):
-        """Send message to specific user (if we track user connections)"""
-        # For now, broadcast to all
-        await self.broadcast(message)
-
-
-manager = ConnectionManager()
 
 
 @asynccontextmanager
@@ -209,14 +172,5 @@ async def user_websocket(websocket: WebSocket, user_id: str):
 
 
 # Export manager for use in other modules
-def get_ws_manager() -> ConnectionManager:
+def get_ws_manager():
     return manager
-
-
-# Broadcast helper function
-async def broadcast_event(event_type: str, data: dict):
-    """Helper to broadcast events from other modules"""
-    await manager.broadcast({
-        "type": event_type,
-        "data": data
-    })

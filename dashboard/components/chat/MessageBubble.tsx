@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { Bot, Check, CheckCheck, FileText, Image as ImageIcon, Video, X, Download, File, RefreshCw, AlertCircle } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { AudioPlayer } from "./AudioPlayer";
+import { formatPhoneE164, isPhoneLike } from "@/lib/formatters/phone";
 
 interface MessageBubbleProps {
   content: string;
@@ -22,6 +23,7 @@ interface MessageBubbleProps {
   mediaDuration?: number | null;
   customerPic?: string | null;
   customerName?: string;
+  highlightQuery?: string;
 }
 
 export function MessageBubble({ 
@@ -39,7 +41,8 @@ export function MessageBubble({
   mediaMimetype,
   mediaDuration,
   customerPic,
-  customerName
+  customerName,
+  highlightQuery
 }: MessageBubbleProps) {
   const [showImageModal, setShowImageModal] = useState(false);
   const [imageError, setImageError] = useState(false);
@@ -70,19 +73,8 @@ export function MessageBubble({
   const formatSenderName = (name: string | undefined): string => {
     if (!name) return "";
     
-    // Check if name is purely numeric (or with + and spaces)
-    const cleanedName = name.replace(/[\s+\-]/g, "");
-    if (/^\d{10,}$/.test(cleanedName)) {
-      // It's a long number - format it nicely
-      if (cleanedName.length >= 12) {
-        const country = cleanedName.slice(0, -10);
-        const first = cleanedName.slice(-10, -7);
-        const second = cleanedName.slice(-7, -4);
-        const third = cleanedName.slice(-4);
-        return `+${country} ${first} ${second} ${third}`;
-      } else if (cleanedName.length >= 10) {
-        return `+${cleanedName.slice(0, -7)} ${cleanedName.slice(-7, -4)} ${cleanedName.slice(-4)}`;
-      }
+    if (isPhoneLike(name)) {
+      return formatPhoneE164(name);
     }
     
     // Truncate very long names
@@ -94,6 +86,32 @@ export function MessageBubble({
   };
   
   const displaySenderName = formatSenderName(senderName);
+
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const renderHighlightedText = (text: string) => {
+    if (!highlightQuery) return text;
+    const query = highlightQuery.trim();
+    if (!query) return text;
+    const parts = text.split(new RegExp(`(${escapeRegExp(query)})`, "ig"));
+    const queryLower = query.toLowerCase();
+
+    return parts.map((part, index) =>
+      part.toLowerCase() === queryLower ? (
+        <mark
+          key={`${part}-${index}`}
+          className={cn(
+            "rounded px-0.5",
+            isOwn ? "bg-white/30 text-white" : "bg-yellow-200/70 text-foreground"
+          )}
+        >
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+  };
   
   // Format duration for audio/video
   const formatDuration = (seconds?: number | null) => {
@@ -153,7 +171,7 @@ export function MessageBubble({
                 />
                 {content && !imageLoading && (
                   <p className="text-sm mt-2 leading-relaxed" dir="auto">
-                    {content}
+                    {renderHighlightedText(content)}
                   </p>
                 )}
               </>
@@ -206,7 +224,7 @@ export function MessageBubble({
                 />
                 {content && (
                   <p className="text-sm mt-2 leading-relaxed" dir="auto">
-                    {content}
+                    {renderHighlightedText(content)}
                   </p>
                 )}
               </div>
@@ -340,14 +358,19 @@ export function MessageBubble({
       
       case "reaction":
         return (
-          <span className="text-3xl leading-none">{content}</span>
+          <span className={cn(
+            "inline-flex items-center px-2 py-1 rounded-full text-sm leading-none",
+            isOwn ? "bg-primary/20 text-white" : "bg-surface-elevated text-foreground"
+          )}>
+            {content}
+          </span>
         );
       
       default:
         // Text message - render with emoji support
         return (
           <p className="text-sm leading-relaxed whitespace-pre-wrap break-words" dir="auto">
-            {content}
+            {renderHighlightedText(content)}
           </p>
         );
     }
@@ -401,7 +424,10 @@ export function MessageBubble({
         >
           {/* Sender name for group messages */}
           {!isOwn && isGroup && displaySenderName && type !== "reaction" && (
-            <div className="text-xs font-semibold mb-1 text-primary truncate max-w-[200px]">
+            <div 
+              className="text-xs font-semibold mb-1 text-primary truncate max-w-[200px]"
+              dir={isPhoneLike(senderName || "") || displaySenderName.startsWith("+") ? "ltr" : undefined}
+            >
               {displaySenderName}
             </div>
           )}
