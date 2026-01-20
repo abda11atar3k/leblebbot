@@ -1,8 +1,12 @@
+import asyncio
 import base64
+import logging
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import unquote
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -42,6 +46,83 @@ _group_names_cache: Dict[str, Any] = {
     "ttl": 300  # 5 minutes
 }
 
+# Group profile pics cache (refreshes every 30 minutes)
+_group_pics_cache: Dict[str, Any] = {
+    "data": {},  # jid -> pic_url
+    "timestamp": 0,
+    "ttl": 1800  # 30 minutes
+}
+
+# Contact profiles cache (name and picture)
+_contact_profiles_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def clear_all_whatsapp_cache():
+    """Clear all WhatsApp related caches. Call when disconnecting/reconnecting."""
+    global _contacts_cache, _messages_cache, _group_names_cache, _group_pics_cache, _contact_profiles_cache
+    
+    _contacts_cache = {
+        "data": {},
+        "timestamp": 0,
+        "ttl": 300
+    }
+    _messages_cache = {}
+    _group_names_cache = {
+        "data": {},
+        "timestamp": 0,
+        "ttl": 300
+    }
+    _group_pics_cache = {
+        "data": {},
+        "timestamp": 0,
+        "ttl": 1800
+    }
+    _contact_profiles_cache = {}
+    
+    # Also clear media cache
+    try:
+        import shutil
+        from pathlib import Path
+        media_cache_dir = Path("/tmp/leblebbot_media_cache")
+        if media_cache_dir.exists():
+            shutil.rmtree(media_cache_dir)
+            media_cache_dir.mkdir(exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to clear media cache: {e}")
+    
+    return {"status": "success", "message": "All WhatsApp caches cleared"}
+
+
+async def get_contact_profile(phone_number: str) -> Dict[str, Any]:
+    """Get contact profile (name, picture) with caching."""
+    global _contact_profiles_cache
+    
+    # Clean phone number
+    clean_phone = phone_number.replace("@s.whatsapp.net", "").replace("+", "")
+    
+    # Check cache first
+    if clean_phone in _contact_profiles_cache:
+        return _contact_profiles_cache[clean_phone]
+    
+    # Fetch from API
+    try:
+        evolution_service = get_evolution_service()
+        profile = await evolution_service.get_contact_profile(clean_phone)
+        if profile:
+            result = {
+                "name": profile.get("name") or None,
+                "picture": profile.get("picture") or None,
+                "status": profile.get("status", {}).get("status") if isinstance(profile.get("status"), dict) else None
+            }
+            _contact_profiles_cache[clean_phone] = result
+            return result
+    except Exception as e:
+        logger.warning(f"Failed to fetch profile for {clean_phone}: {e}")
+    
+    # Cache empty result to avoid repeated failed calls
+    _contact_profiles_cache[clean_phone] = {"name": None, "picture": None, "status": None}
+    return _contact_profiles_cache[clean_phone]
+
 async def get_group_name(group_jid: str) -> Optional[str]:
     """Get the real name (subject) of a group with caching."""
     global _group_names_cache
@@ -61,6 +142,34 @@ async def get_group_name(group_jid: str) -> Optional[str]:
                 return subject
     except Exception as e:
         logger.warning(f"Failed to fetch group info for {group_jid}: {e}")
+
+
+async def get_group_profile_pic(group_jid: str) -> Optional[str]:
+    """Get the profile picture URL of a group with caching."""
+    global _group_pics_cache
+    
+    # Check cache first
+    if group_jid in _group_pics_cache["data"]:
+        return _group_pics_cache["data"][group_jid]
+    
+    # Fetch from API
+    try:
+        evolution_service = get_evolution_service()
+        result = await evolution_service._request(
+            "POST",
+            f"/chat/fetchProfilePictureUrl/{evolution_service.instance_name}",
+            {"number": group_jid}
+        )
+        if result.get("success"):
+            pic_url = result.get("data", {}).get("profilePictureUrl")
+            _group_pics_cache["data"][group_jid] = pic_url
+            return pic_url
+    except Exception as e:
+        logger.warning(f"Failed to fetch group pic for {group_jid}: {e}")
+    
+    # Cache None to avoid repeated failed calls
+    _group_pics_cache["data"][group_jid] = None
+    return None
     
     return None
 
@@ -79,9 +188,18 @@ async def get_cached_contacts() -> Dict[str, Any]:
     contacts = await evolution_service.get_contacts(limit=1000)
     
     contacts_map = {}
+    lid_to_phone_map = {}  # Maps @lid JIDs to @s.whatsapp.net JIDs
+    
+    # First pass: process individual contacts (priority)
     for contact in contacts:
         jid = contact.get("remoteJid", "")
         if not jid:
+            continue
+        
+        is_group = contact.get("isGroup", False) or contact.get("type") == "group" or "@g.us" in jid
+        
+        # Skip groups in first pass
+        if is_group:
             continue
             
         name = contact.get("pushName") or contact.get("name")
@@ -90,17 +208,79 @@ async def get_cached_contacts() -> Dict[str, Any]:
             
         contact_data = {
             "name": name,
-            "subject": contact.get("subject") or None,
+            "subject": None,
             "profile_pic": contact.get("profilePicUrl"),
-            "is_group": contact.get("isGroup", False) or contact.get("type") == "group"
+            "is_group": False,
+            "phone_jid": jid if "@s.whatsapp.net" in jid else None  # Store phone JID
         }
         
         contacts_map[jid] = contact_data
         
-        # Also map by cleaned phone number
+        # Map by cleaned phone number for individual contacts
         clean_phone = clean_phone_number(jid)
         if clean_phone and clean_phone != jid:
             contacts_map[clean_phone] = contact_data
+    
+    # Second pass: process groups (won't overwrite individual contacts)
+    for contact in contacts:
+        jid = contact.get("remoteJid", "")
+        if not jid:
+            continue
+        
+        is_group = contact.get("isGroup", False) or contact.get("type") == "group" or "@g.us" in jid
+        
+        # Only groups in second pass
+        if not is_group:
+            continue
+            
+        name = contact.get("pushName") or contact.get("subject") or contact.get("name")
+        if not name or name in ["Você", "You", "أنت", "Yo"]:
+            continue
+            
+        contact_data = {
+            "name": name,
+            "subject": contact.get("subject") or name,
+            "profile_pic": contact.get("profilePicUrl"),
+            "is_group": True
+        }
+        
+        # Only store by full JID for groups - DON'T map by phone to avoid overwriting individuals
+        contacts_map[jid] = contact_data
+    
+    # Third pass: build @lid to @s.whatsapp.net mapping
+    # Use profile picture URL as identifier (more reliable than name)
+    # because WhatsApp users can have different display names
+    pic_to_phone_jid = {}
+    phone_to_pic = {}
+    
+    for contact in contacts:
+        jid = contact.get("remoteJid", "")
+        pic_url = contact.get("profilePicUrl", "")
+        if "@s.whatsapp.net" in jid and pic_url:
+            # Extract unique part of profile pic URL (the file path)
+            # URLs like: https://pps.whatsapp.net/v/t61.24694-24/554344897_...
+            pic_key = pic_url.split("/")[-1].split("?")[0] if pic_url else ""
+            if pic_key and len(pic_key) > 10:
+                pic_to_phone_jid[pic_key] = jid
+                phone_to_pic[jid] = pic_key
+    
+    for contact in contacts:
+        jid = contact.get("remoteJid", "")
+        pic_url = contact.get("profilePicUrl", "")
+        if "@lid" in jid and pic_url:
+            pic_key = pic_url.split("/")[-1].split("?")[0] if pic_url else ""
+            if pic_key and len(pic_key) > 10:
+                phone_jid = pic_to_phone_jid.get(pic_key)
+                if phone_jid:
+                    lid_to_phone_map[jid] = phone_jid
+                    # Also map the @lid JID to the same contact data
+                    if phone_jid in contacts_map:
+                        contacts_map[jid] = contacts_map[phone_jid].copy()
+                        contacts_map[jid]["lid_jid"] = jid
+                        contacts_map[jid]["phone_jid"] = phone_jid
+    
+    # Store lid mapping in cache for use elsewhere
+    contacts_map["__lid_to_phone__"] = lid_to_phone_map
     
     # Update cache
     _contacts_cache["data"] = contacts_map
@@ -564,6 +744,8 @@ def clean_phone_number(jid: str) -> str:
     Removes @lid, @s.whatsapp.net, @g.us suffixes and handles group IDs.
     Returns empty string if the number is too long to be a real phone number.
     """
+    is_lid = "@lid" in jid
+    
     # Remove suffixes
     phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "").replace("@lid", "")
     
@@ -579,18 +761,16 @@ def clean_phone_number(jid: str) -> str:
         # Group IDs are timestamp + phone, extract the phone part (last 10-12 digits)
         phone = phone[-10:]
     
-    # Handle @lid JIDs - they have a format like "38041112592620"
-    # The prefix (e.g., "38") is internal WhatsApp routing, remove it to get actual phone
-    elif phone.startswith("38") and len(phone) > 12:
-        # Remove the "38" prefix for @lid numbers
-        phone = phone[2:]
-    elif phone.startswith("19") and len(phone) > 12:
-        # Another common @lid prefix
-        phone = phone[2:]
+    # Handle @lid JIDs - they have internal WhatsApp IDs, NOT phone numbers
+    # @lid numbers like "147249061429447" or "19314602176661" are internal IDs
+    # They should NOT be displayed as phone numbers
+    elif is_lid:
+        # @lid JIDs don't contain real phone numbers - return empty
+        # The actual phone number should come from contact mapping
+        return ""
     
     # For other very long numbers (> 15 digits), it's likely an internal ID
     # Real phone numbers are max 15 digits (including country code)
-    # Return empty to signal this is not a real phone number
     if len(phone) > 15:
         return ""
     
@@ -612,6 +792,7 @@ async def get_whatsapp_chats(
     Returns chats with last message preview, profile pics, proper names, and unread counts.
     Deduplicates by remoteJid and merges contact names.
     Uses cached contacts for faster loading.
+    Pre-fetches group names in parallel for better performance.
     """
     evolution_service = get_evolution_service()
     
@@ -630,27 +811,114 @@ async def get_whatsapp_chats(
     except Exception:
         pass
     
+    # Get @lid to @s.whatsapp.net mapping from contacts
+    lid_to_phone_map = contacts_map.get("__lid_to_phone__", {})
+    
     # First pass: collect all phone numbers that have @s.whatsapp.net chats
-    # This helps us filter out @lid duplicates
+    # and build a map of latest message timestamp per normalized JID
     phones_with_normal_jid = set()
+    jid_latest_timestamp = {}  # Maps normalized JID -> (timestamp, original_jid)
+    
     for chat in chats:
         remote_jid = chat.get("remoteJid", "")
+        last_msg = chat.get("lastMessage", {})
+        timestamp = last_msg.get("messageTimestamp", 0) if last_msg else 0
+        
         if "@s.whatsapp.net" in remote_jid:
             phone = clean_phone_number(remote_jid)
             phones_with_normal_jid.add(phone)
+            # Track which JID has the latest message
+            normalized = remote_jid
+            if normalized not in jid_latest_timestamp or timestamp > jid_latest_timestamp[normalized][0]:
+                jid_latest_timestamp[normalized] = (timestamp, remote_jid)
+        elif "@lid" in remote_jid:
+            # Map @lid to phone JID if we have the mapping
+            phone_jid = lid_to_phone_map.get(remote_jid)
+            if phone_jid:
+                # Check if this @lid chat has newer messages
+                if phone_jid not in jid_latest_timestamp or timestamp > jid_latest_timestamp[phone_jid][0]:
+                    jid_latest_timestamp[phone_jid] = (timestamp, remote_jid)
     
-    # Deduplicate by remoteJid using dict
-    seen_jids = {}
+    # ============================================
+    # PARALLEL PRE-FETCH: Get all group names at once
+    # ============================================
+    group_jids_to_fetch: List[str] = []
+    for chat in chats:
+        remote_jid = chat.get("remoteJid", "")
+        if not remote_jid or "@lid" in remote_jid:
+            continue
+        # Filter empty conversations
+        last_msg = chat.get("lastMessage")
+        unread = chat.get("unreadCount", 0)
+        if not last_msg and unread == 0:
+            continue
+        # Collect group JIDs not in cache
+        if "@g.us" in remote_jid:
+            if remote_jid not in _group_names_cache["data"]:
+                group_jids_to_fetch.append(remote_jid)
+            # Also fetch group pics if not cached
+            if remote_jid not in _group_pics_cache["data"]:
+                group_jids_to_fetch.append(remote_jid)
+    
+    # Remove duplicates
+    group_jids_to_fetch = list(set(group_jids_to_fetch))
+    
+    # Fetch all group names and pics in parallel
+    if group_jids_to_fetch:
+        async def fetch_group_info_safe(jid: str):
+            """Fetch both group name and profile pic."""
+            try:
+                # Fetch name and pic in parallel
+                await asyncio.gather(
+                    get_group_name(jid),
+                    get_group_profile_pic(jid),
+                    return_exceptions=True
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fetch group info for {jid}: {e}")
+        
+        await asyncio.gather(*[fetch_group_info_safe(jid) for jid in group_jids_to_fetch], return_exceptions=True)
+    # ============================================
+    
+    # Deduplicate by normalized JID (map @lid to @s.whatsapp.net)
+    seen_normalized_jids = {}
     
     for chat in chats:
         remote_jid = chat.get("remoteJid", "")
         if not remote_jid:
             continue
+        
+        is_group = "@g.us" in remote_jid
+        is_lid = "@lid" in remote_jid
+        
+        # Normalize JID: map @lid to @s.whatsapp.net if mapping exists
+        normalized_jid = remote_jid
+        display_jid = remote_jid  # JID to use for display/API calls
+        
+        if is_lid:
+            phone_jid = lid_to_phone_map.get(remote_jid)
+            if phone_jid:
+                normalized_jid = phone_jid
+                # Check if this @lid chat has the latest messages
+                if phone_jid in jid_latest_timestamp:
+                    latest_ts, latest_jid = jid_latest_timestamp[phone_jid]
+                    if latest_jid == remote_jid:
+                        # This @lid chat has newer messages, use it
+                        display_jid = remote_jid
+                    else:
+                        # @s.whatsapp.net has newer messages, skip this @lid
+                        continue
+            # If no mapping and not a known phone, show as-is for @lid chats
+            # (they might be new contacts)
             
-        # Skip duplicates - keep the most recent one
-        if remote_jid in seen_jids:
+        # Skip duplicates by normalized JID - keep only the first (most recent) one
+        if normalized_jid in seen_normalized_jids:
             continue
-        seen_jids[remote_jid] = True
+        seen_normalized_jids[normalized_jid] = True
+        
+        # Skip status broadcast and other special JIDs
+        if "status@broadcast" in remote_jid or "broadcast" in remote_jid:
+            continue
         
         # Filter empty conversations - must have lastMessage OR unreadCount > 0
         last_msg = chat.get("lastMessage")
@@ -658,30 +926,25 @@ async def get_whatsapp_chats(
         if not last_msg and unread == 0:
             continue
         
-        is_group = "@g.us" in remote_jid
-        is_lid = "@lid" in remote_jid
         phone = clean_phone_number(remote_jid)
-        
-        # Skip all @lid chats - they are internal WhatsApp IDs that often duplicate
-        # the @s.whatsapp.net chats and don't contain real phone numbers
-        if is_lid:
-            continue
         
         # Get name - improved logic with multiple fallbacks
         contact_info = contacts_map.get(remote_jid, {})
+        if not contact_info:
+            # Try the normalized JID
+            contact_info = contacts_map.get(normalized_jid, {})
         if not contact_info:
             # Try cleaned phone number
             contact_info = contacts_map.get(phone, {})
         
         if is_group:
-            # For groups, ALWAYS fetch the real group subject from API first
-            # This is the most reliable source for group names
-            real_group_name = await get_group_name(remote_jid)
+            # For groups, use pre-fetched group name from cache (no API call here)
+            real_group_name = _group_names_cache["data"].get(remote_jid)
             
             if real_group_name:
                 name = real_group_name
             else:
-                # Fallback to other sources only if API didn't return a name
+                # Fallback to other sources only if cache didn't have a name
                 contact_group_name = contact_info.get("subject") or contact_info.get("name")
                 name = (
                     chat.get("subject") or              # Group subject
@@ -704,11 +967,15 @@ async def get_whatsapp_chats(
         if name in ["Você", "You", "أنت", "Yo"]:
             continue
         
-        # Get profile picture from contacts or chat
+        # Get profile picture from contacts, chat, or group cache
         profile_pic = (
             contact_info.get("profile_pic") or 
             chat.get("profilePicUrl")
         )
+        
+        # For groups without profile pic, try the group pics cache
+        if is_group and not profile_pic:
+            profile_pic = _group_pics_cache["data"].get(remote_jid)
         
         # Check if banned
         is_banned = phone in banned_users
@@ -729,14 +996,14 @@ async def get_whatsapp_chats(
         last_msg_type = "text"
         
         if last_msg:
-            msg = last_msg.get("message", {})
+            msg = last_msg.get("message") or {}
             msg_type = last_msg.get("messageType", "")
             
             # Determine message type and content
             if msg.get("conversation"):
                 last_message_content = msg.get("conversation")
-            elif msg.get("extendedTextMessage", {}).get("text"):
-                last_message_content = msg.get("extendedTextMessage", {}).get("text")
+            elif (msg.get("extendedTextMessage") or {}).get("text"):
+                last_message_content = (msg.get("extendedTextMessage") or {}).get("text")
             elif msg_type == "imageMessage" or msg.get("imageMessage"):
                 last_message_content = "📷 صورة"
                 last_msg_type = "image"
@@ -750,17 +1017,19 @@ async def get_whatsapp_chats(
                 last_message_content = "🏷️ ملصق"
                 last_msg_type = "sticker"
             elif msg_type == "documentMessage" or msg.get("documentMessage"):
-                last_message_content = "📄 " + msg.get("documentMessage", {}).get("fileName", "مستند")
+                doc_msg = msg.get("documentMessage") or {}
+                last_message_content = "📄 " + doc_msg.get("fileName", "مستند")
                 last_msg_type = "document"
             elif msg_type == "reactionMessage" or msg.get("reactionMessage"):
-                emoji = msg.get("reactionMessage", {}).get("text", "👍")
+                reaction_msg = msg.get("reactionMessage") or {}
+                emoji = reaction_msg.get("text", "👍")
                 last_message_content = f"تفاعل {emoji}"
                 last_msg_type = "reaction"
             else:
                 last_message_content = "[رسالة]"
         
         # Get timestamp
-        timestamp = last_msg.get("messageTimestamp")
+        timestamp = last_msg.get("messageTimestamp") if last_msg else None
         if timestamp:
             try:
                 time_str = datetime.fromtimestamp(int(timestamp)).isoformat()
@@ -769,16 +1038,35 @@ async def get_whatsapp_chats(
         else:
             time_str = chat.get("updatedAt") or datetime.utcnow().isoformat()
     
-        # For @lid chats, use name as phone since it's not a real number
-        is_lid = "@lid" in remote_jid
-        display_phone = name if is_lid else phone
+        # For @lid chats without a mapped phone, use name instead of invalid number
+        # Also skip if we have no useful name (just internal ID)
+        if is_lid:
+            # For @lid, phone would be empty from clean_phone_number
+            # Use the mapped phone JID if available, otherwise use name
+            if contact_info.get("phone_jid"):
+                display_phone = clean_phone_number(contact_info["phone_jid"])
+            else:
+                display_phone = ""  # No valid phone for unmapped @lid
+            
+            # Skip @lid entries without useful name or phone mapping
+            if not name or (name.isdigit() and len(name) > 12):
+                continue
+        elif is_group:
+            # For groups, phone is not really useful - use empty or short ID
+            display_phone = ""
+        else:
+            # For regular contacts, use the cleaned phone number
+            display_phone = phone if phone else ""
+        
+        # Use the JID that has the most recent messages for API calls
+        api_jid = display_jid if is_lid else remote_jid
         
         # Only add if we haven't reached the limit
-        if len(seen_jids) <= limit:
-            seen_jids[remote_jid] = {
-                "id": remote_jid,
-                "remote_jid": remote_jid,
-                "phone": display_phone,
+        if len(seen_normalized_jids) <= limit:
+            seen_normalized_jids[normalized_jid] = {
+                "id": api_jid,  # Use the JID with newest messages
+                "remote_jid": api_jid,
+                "phone": display_phone if display_phone else name,
                 "name": name,
                 "last_message": last_message_content[:100] if last_message_content else "",
                 "last_message_type": last_msg_type,
@@ -787,11 +1075,13 @@ async def get_whatsapp_chats(
                 "is_group": is_group,
                 "profile_pic": profile_pic,
                 "is_banned": is_banned,
-                "platform": "whatsapp"
+                "platform": "whatsapp",
+                "lid_jid": remote_jid if is_lid else None,  # Store @lid JID for reference
+                "phone_jid": normalized_jid if normalized_jid != remote_jid else None  # Store phone JID
             }
     
     # Convert to list and sort by last message time (most recent first)
-    result = [v for v in seen_jids.values() if isinstance(v, dict)]
+    result = [v for v in seen_normalized_jids.values() if isinstance(v, dict)]
     result.sort(key=lambda x: x.get("last_message_time", ""), reverse=True)
     
     # Limit results
@@ -840,6 +1130,8 @@ async def get_whatsapp_chat_messages(
     
     # For @lid chats, get owner JID to fix fromMe detection
     owner_jid = None
+    alternate_jid = None  # For fetching messages from linked @s.whatsapp.net JID
+    
     if is_lid:
         try:
             instance_info = await evolution_service._request(
@@ -852,27 +1144,70 @@ async def get_whatsapp_chat_messages(
                     owner_jid = data[0].get("ownerJid", "").replace("@s.whatsapp.net", "")
         except Exception:
             pass
+        
+        # Check if we have a linked @s.whatsapp.net JID for this @lid
+        # This allows us to fetch older messages from the original phone number chat
+        contact_info = contacts_map.get(remote_jid, {})
+        if contact_info.get("phone_jid"):
+            alternate_jid = contact_info["phone_jid"]
+        else:
+            # Try reverse lookup - find by profile pic
+            lid_to_phone = contacts_map.get("__lid_to_phone__", {})
+            if remote_jid in lid_to_phone:
+                alternate_jid = lid_to_phone[remote_jid]
     
     # Get messages from Evolution API with pagination
     messages_data = await evolution_service.get_messages(remote_jid, limit=limit, page=page)
     messages = messages_data.get("records", [])
     messages_total = messages_data.get("total", len(messages))
     
+    # If this is @lid and we have an alternate JID, also fetch from the old JID
+    # This merges the chat history from before WhatsApp migrated to @lid
+    if is_lid and alternate_jid and page == 1:
+        try:
+            alt_data = await evolution_service.get_messages(alternate_jid, limit=limit, page=page)
+            alt_messages = alt_data.get("records", [])
+            alt_total = alt_data.get("total", 0)
+            
+            # Merge messages (they'll be deduplicated later)
+            messages.extend(alt_messages)
+            messages_total = max(messages_total, alt_total)
+            
+            # Sort by timestamp (newest first)
+            messages.sort(key=lambda x: x.get("messageTimestamp", 0), reverse=True)
+            messages = messages[:limit]  # Keep only the requested limit
+            
+            logger.info(f"Merged messages from {remote_jid} and {alternate_jid}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch alternate JID messages: {e}")
+    
     # Track seen message IDs to prevent duplicates
     seen_ids = set()
     result = []
     
     # For groups, fetch participants to get the @lid to phone number mapping
-    # This is the most reliable source for real phone numbers
+    # This is the most reliable source for real phone numbers and profile pics
     group_participants_map = {}
+    participants_pics_map = {}  # Map phone number to profile pic
+    participants_names_map = {}  # Map phone number to name
     if is_group:
         try:
             participants = await evolution_service.get_group_participants(remote_jid)
             for p in participants:
                 lid_id = p.get("id", "")
                 phone_number = p.get("phoneNumber", "")
+                img_url = p.get("imgUrl")
+                name = p.get("name")
                 if lid_id and phone_number:
                     group_participants_map[lid_id] = phone_number
+                    # Store profile pic by phone number (without @s.whatsapp.net)
+                    clean_phone = phone_number.replace("@s.whatsapp.net", "")
+                    if img_url:
+                        participants_pics_map[clean_phone] = img_url
+                        participants_pics_map[phone_number] = img_url
+                    if name:
+                        participants_names_map[clean_phone] = name
+                        participants_names_map[phone_number] = name
         except Exception as e:
             logger.warning(f"Failed to fetch group participants: {e}")
     
@@ -917,14 +1252,14 @@ async def get_whatsapp_chat_messages(
             continue
         seen_ids.add(msg_id)
         
-        message_data = msg.get("message", {})
+        message_data = msg.get("message") or {}
         
         # Extract message content
         content = (
             message_data.get("conversation") or
-            message_data.get("extendedTextMessage", {}).get("text") or
-            message_data.get("imageMessage", {}).get("caption") or
-            message_data.get("videoMessage", {}).get("caption") or
+            (message_data.get("extendedTextMessage") or {}).get("text") or
+            (message_data.get("imageMessage") or {}).get("caption") or
+            (message_data.get("videoMessage") or {}).get("caption") or
             ""
         )
         
@@ -959,23 +1294,32 @@ async def get_whatsapp_chat_messages(
         media_url = None
         media_mimetype = None
         media_duration = None
+        media_thumbnail = None  # Base64 thumbnail for instant preview
         has_media = False
         
         if message_data.get("imageMessage"):
             msg_type = "image"
-            img_msg = message_data.get("imageMessage", {})
+            img_msg = message_data.get("imageMessage") or {}
             media_mimetype = img_msg.get("mimetype")
+            # Extract thumbnail for instant preview
+            thumbnail_data = img_msg.get("jpegThumbnail")
+            if thumbnail_data:
+                media_thumbnail = f"data:image/jpeg;base64,{thumbnail_data}"
             has_media = True
             content = content or ""
         elif message_data.get("videoMessage"):
             msg_type = "video"
-            vid_msg = message_data.get("videoMessage", {})
+            vid_msg = message_data.get("videoMessage") or {}
             media_mimetype = vid_msg.get("mimetype")
             media_duration = vid_msg.get("seconds")
+            # Extract thumbnail for video preview
+            thumbnail_data = vid_msg.get("jpegThumbnail")
+            if thumbnail_data:
+                media_thumbnail = f"data:image/jpeg;base64,{thumbnail_data}"
             has_media = True
             content = content or ""
         elif message_data.get("audioMessage"):
-            aud_msg = message_data.get("audioMessage", {})
+            aud_msg = message_data.get("audioMessage") or {}
             media_mimetype = aud_msg.get("mimetype")
             media_duration = aud_msg.get("seconds")
             is_ptt = aud_msg.get("ptt", False)  # Push-to-talk (voice note)
@@ -984,21 +1328,26 @@ async def get_whatsapp_chat_messages(
             content = ""
         elif message_data.get("documentMessage"):
             msg_type = "document"
-            doc_msg = message_data.get("documentMessage", {})
+            doc_msg = message_data.get("documentMessage") or {}
             media_mimetype = doc_msg.get("mimetype")
             has_media = True
             content = doc_msg.get("fileName", "Document")
         elif message_data.get("stickerMessage"):
             msg_type = "sticker"
-            sticker_msg = message_data.get("stickerMessage", {})
+            sticker_msg = message_data.get("stickerMessage") or {}
             media_mimetype = sticker_msg.get("mimetype")
+            # Extract thumbnail for sticker preview
+            thumbnail_data = sticker_msg.get("jpegThumbnail")
+            if thumbnail_data:
+                media_thumbnail = f"data:image/jpeg;base64,{thumbnail_data}"
             has_media = True
             content = ""
         elif message_data.get("reactionMessage"):
             msg_type = "reaction"
-            content = message_data.get("reactionMessage", {}).get("text", "")
+            reaction_msg = message_data.get("reactionMessage") or {}
+            content = reaction_msg.get("text", "")
         
-        # Build media proxy URL if message has media
+        # Build media URL - always use proxy (S3 URLs have internal hostnames)
         if has_media and msg_id:
             from urllib.parse import quote
             encoded_jid = quote(remote_jid, safe="")
@@ -1069,6 +1418,18 @@ async def get_whatsapp_chat_messages(
                         sender_name = contact_name
                     sender_pic = contact_info.get("profile_pic")
                 
+                # Try to get profile pic from group participants if not found in contacts
+                if not sender_pic:
+                    clean_phone = clean_phone_number(participant_alt or participant)
+                    sender_pic = participants_pics_map.get(clean_phone) or participants_pics_map.get(participant_alt) or participants_pics_map.get(participant)
+                
+                # Try to get name from group participants if still no name
+                if not sender_name or sender_name in ["Você", "You", "أنت", "Yo"] or (sender_name.isdigit() and len(sender_name) > 10):
+                    clean_phone = clean_phone_number(participant_alt or participant)
+                    participant_name = participants_names_map.get(clean_phone) or participants_names_map.get(participant_alt) or participants_names_map.get(participant)
+                    if participant_name:
+                        sender_name = participant_name
+                
                 # If still no usable name, show the real phone number
                 if not sender_name or sender_name in ["Você", "You", "أنت", "Yo"] or (sender_name.isdigit() and len(sender_name) > 10):
                     # First try participantAlt (real phone number from Evolution API)
@@ -1116,6 +1477,7 @@ async def get_whatsapp_chat_messages(
             "media_url": media_url,
             "media_mimetype": media_mimetype,
             "media_duration": media_duration,
+            "media_thumbnail": media_thumbnail,
             "remote_jid": key.get("remoteJid", remote_jid)
         })
     
@@ -1144,7 +1506,17 @@ async def get_whatsapp_chat_messages(
             if not chat_name or chat_name in ["Você", "You", "أنت", "Yo"]:
                 chat_name = f"مجموعة {phone[-6:]}" if len(phone) > 6 else f"مجموعة {phone}"
     else:
+        # For individual chats, try to get profile from Evolution API
         chat_name = contact_info.get("name")
+        
+        # Fetch profile from Evolution API to get picture and name
+        profile = await get_contact_profile(phone)
+        if profile:
+            if not chat_pic and profile.get("picture"):
+                chat_pic = profile["picture"]
+            if profile.get("name") and (not chat_name or chat_name in ["Você", "You", "أنت", "Yo"]):
+                chat_name = profile["name"]
+        
         # Skip self-reference names
         if chat_name in ["Você", "You", "أنت", "Yo"]:
             chat_name = None
@@ -1228,8 +1600,26 @@ async def get_banned_users():
 
 
 # ===================
-# Media Proxy
+# Media Proxy with Caching
 # ===================
+
+import hashlib
+import os
+from pathlib import Path
+
+# Media cache directory
+MEDIA_CACHE_DIR = Path("/tmp/leblebbot_media_cache")
+MEDIA_CACHE_DIR.mkdir(exist_ok=True)
+
+# In-memory cache for quick lookups (mimetype info)
+_media_cache_info: Dict[str, Dict[str, str]] = {}
+
+
+def get_media_cache_path(message_id: str, remote_jid: str) -> Path:
+    """Generate a unique cache file path for media."""
+    cache_key = hashlib.md5(f"{message_id}:{remote_jid}".encode()).hexdigest()
+    return MEDIA_CACHE_DIR / cache_key
+
 
 @router.get("/media/{message_id}")
 async def get_media(
@@ -1238,9 +1628,8 @@ async def get_media(
     from_me: bool = Query(False, description="Whether the message is from me")
 ):
     """
-    Get media file from Evolution API as base64 and return as binary.
-    This proxies media requests to Evolution API to handle authentication.
-    Includes retry logic for transient failures.
+    Get media file from Evolution API.
+    Includes disk caching to speed up repeated requests.
     """
     import asyncio
     
@@ -1250,19 +1639,40 @@ async def get_media(
     message_id = unquote(message_id)
     remote_jid = unquote(remote_jid)
     
-    # Build message key
+    # Check disk cache first
+    cache_path = get_media_cache_path(message_id, remote_jid)
+    cache_key = cache_path.name
+    
+    if cache_path.exists():
+        try:
+            media_bytes = cache_path.read_bytes()
+            cached_info = _media_cache_info.get(cache_key, {})
+            mimetype = cached_info.get("mimetype", "application/octet-stream")
+            
+            return Response(
+                content=media_bytes,
+                media_type=mimetype,
+                headers={
+                    "Cache-Control": "public, max-age=604800",
+                    "Content-Disposition": "inline",
+                    "Access-Control-Allow-Origin": "*",
+                    "X-Cache": "HIT"
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read cached media: {e}")
+    
+    # Get from Evolution API
     message_key = {
         "id": message_id,
         "remoteJid": remote_jid,
         "fromMe": from_me
     }
     
-    # Retry logic - try up to 3 times with exponential backoff
     max_retries = 3
     last_error = "Media not found"
     
     for attempt in range(max_retries):
-        # Get base64 media from Evolution API
         result = await evolution_service.get_media_base64(message_key)
         
         if result.get("success"):
@@ -1270,20 +1680,24 @@ async def get_media(
             mimetype = result.get("mimetype", "application/octet-stream")
             
             if base64_data:
-                # Decode base64 to binary
                 try:
                     media_bytes = base64.b64decode(base64_data)
                     
-                    # Return as binary response with proper content type
+                    # Save to disk cache (async-safe with sync write)
+                    try:
+                        cache_path.write_bytes(media_bytes)
+                        _media_cache_info[cache_key] = {"mimetype": mimetype}
+                    except Exception as e:
+                        logger.warning(f"Failed to cache media: {e}")
+                    
                     return Response(
                         content=media_bytes,
                         media_type=mimetype,
                         headers={
-                            "Cache-Control": "public, max-age=86400",  # Cache for 1 day
+                            "Cache-Control": "public, max-age=604800",  # Cache for 7 days
                             "Content-Disposition": "inline",
                             "Access-Control-Allow-Origin": "*",
-                            "Access-Control-Allow-Methods": "GET, OPTIONS",
-                            "Access-Control-Allow-Headers": "*"
+                            "X-Cache": "MISS"
                         }
                     )
                 except Exception as e:
@@ -1297,8 +1711,7 @@ async def get_media(
         if attempt < max_retries - 1:
             await asyncio.sleep(0.5 * (2 ** attempt))
     
-    # All retries failed - return informative error
-    # Determine if it's likely an expired media issue
+    # All retries failed
     error_detail = last_error
     if "not found" in last_error.lower() or "failed" in last_error.lower():
         error_detail = "Media expired or unavailable. WhatsApp media may expire after some time."
@@ -1307,6 +1720,20 @@ async def get_media(
         status_code=404, 
         detail=error_detail
     )
+
+
+@router.delete("/media/cache")
+async def clear_media_cache():
+    """Clear all cached media files."""
+    import shutil
+    try:
+        if MEDIA_CACHE_DIR.exists():
+            shutil.rmtree(MEDIA_CACHE_DIR)
+            MEDIA_CACHE_DIR.mkdir(exist_ok=True)
+        _media_cache_info.clear()
+        return {"success": True, "message": "Media cache cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===================
@@ -1357,3 +1784,39 @@ async def send_whatsapp_message(
     except Exception as e:
         logger.error(f"Exception in send_whatsapp_message: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================
+# Evolution API Webhook
+# ===================
+
+@router.post("/webhook/evolution")
+async def evolution_webhook(request_data: dict):
+    """
+    Receive webhook events from Evolution API.
+    This captures sent messages from the phone that weren't being recorded.
+    """
+    try:
+        event = request_data.get("event")
+        data = request_data.get("data", {})
+        instance = request_data.get("instance")
+        
+        logger.info(f"Webhook received: event={event}, instance={instance}")
+        
+        # Clear message cache when new messages arrive
+        if event in ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "SEND_MESSAGE"]:
+            # Get the remoteJid from the message
+            key = data.get("key", {})
+            remote_jid = key.get("remoteJid", "")
+            
+            if remote_jid:
+                # Clear cache for this chat so next fetch gets fresh data
+                cache_key = f"messages:{remote_jid}"
+                if cache_key in _messages_cache:
+                    del _messages_cache[cache_key]
+                    logger.info(f"Cleared message cache for {remote_jid}")
+        
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"status": "error", "message": str(e)}

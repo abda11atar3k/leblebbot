@@ -43,9 +43,9 @@ class Settings(BaseSettings):
     bot_personality: str = "ودود ومحترف"
     bot_dialect: str = "egyptian"  # egyptian, gulf, levantine, standard
     typing_simulation: bool = True
-    typing_speed: float = 3.3  # chars per second
-    min_response_delay: float = 2.0  # seconds
-    max_response_delay: float = 8.0  # seconds
+    typing_speed: float = 15.0  # chars per second (faster typing)
+    min_response_delay: float = 0.5  # seconds (reduced from 2.0)
+    max_response_delay: float = 4.0  # seconds (reduced from 8.0)
     
     # ===================
     # Rate Limiting

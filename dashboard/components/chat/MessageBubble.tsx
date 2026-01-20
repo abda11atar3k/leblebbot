@@ -21,6 +21,7 @@ interface MessageBubbleProps {
   mediaUrl?: string | null;
   mediaMimetype?: string | null;
   mediaDuration?: number | null;
+  mediaThumbnail?: string | null;
   customerPic?: string | null;
   customerName?: string;
   highlightQuery?: string;
@@ -40,6 +41,7 @@ export function MessageBubble({
   mediaUrl,
   mediaMimetype,
   mediaDuration,
+  mediaThumbnail,
   customerPic,
   customerName,
   highlightQuery
@@ -48,6 +50,7 @@ export function MessageBubble({
   const [imageError, setImageError] = useState(false);
   const [imageLoading, setImageLoading] = useState(true);
   const [videoError, setVideoError] = useState(false);
+  const [videoLoading, setVideoLoading] = useState(true);
   const [stickerError, setStickerError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   
@@ -144,9 +147,27 @@ export function MessageBubble({
         const imageUrl = fullMediaUrl ? `${fullMediaUrl}${fullMediaUrl.includes('?') ? '&' : '?'}retry=${retryCount}` : null;
         return (
           <div className="relative rounded-lg overflow-hidden">
-            {imageUrl && !imageError ? (
+            {(imageUrl || mediaThumbnail) && !imageError ? (
               <>
-                {imageLoading && (
+                {/* Show thumbnail instantly while full image loads */}
+                {imageLoading && mediaThumbnail && (
+                  <div className="relative">
+                    <img
+                      src={mediaThumbnail}
+                      alt="Preview"
+                      className="max-w-[280px] max-h-[320px] rounded-lg cursor-pointer object-cover blur-[2px]"
+                      onClick={() => setShowImageModal(true)}
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className={cn(
+                        "w-8 h-8 border-3 rounded-full animate-spin",
+                        isOwn ? "border-white/30 border-t-white" : "border-primary/30 border-t-primary"
+                      )} />
+                    </div>
+                  </div>
+                )}
+                {/* Fallback spinner if no thumbnail */}
+                {imageLoading && !mediaThumbnail && (
                   <div className="w-[240px] h-[180px] bg-black/10 flex items-center justify-center rounded-lg">
                     <div className={cn(
                       "w-8 h-8 border-3 rounded-full animate-spin",
@@ -154,27 +175,48 @@ export function MessageBubble({
                     )} />
                   </div>
                 )}
-                <img
-                  src={imageUrl}
-                  alt="Image"
-                  className={cn(
-                    "max-w-[280px] max-h-[320px] rounded-lg cursor-pointer object-cover",
-                    imageLoading && "hidden"
-                  )}
-                  onClick={() => setShowImageModal(true)}
-                  onError={() => {
-                    setImageError(true);
-                    setImageLoading(false);
-                  }}
-                  onLoad={() => setImageLoading(false)}
-                  loading="lazy"
-                />
+                {/* Full quality image - hidden while loading */}
+                {imageUrl && (
+                  <img
+                    src={imageUrl}
+                    alt="Image"
+                    className={cn(
+                      "max-w-[280px] max-h-[320px] rounded-lg cursor-pointer object-cover transition-opacity duration-200",
+                      imageLoading ? "absolute opacity-0 pointer-events-none" : "opacity-100"
+                    )}
+                    onClick={() => setShowImageModal(true)}
+                    onError={() => {
+                      setImageError(true);
+                      setImageLoading(false);
+                    }}
+                    onLoad={() => setImageLoading(false)}
+                  />
+                )}
                 {content && !imageLoading && (
                   <p className="text-sm mt-2 leading-relaxed" dir="auto">
                     {renderHighlightedText(content)}
                   </p>
                 )}
               </>
+            ) : mediaThumbnail ? (
+              // Show thumbnail when full image is unavailable (expired)
+              <div className="relative">
+                <img
+                  src={mediaThumbnail}
+                  alt="Image preview"
+                  className="max-w-[280px] max-h-[320px] rounded-lg cursor-pointer object-cover"
+                  onClick={() => setShowImageModal(true)}
+                />
+                <div className="absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" />
+                  معاينة فقط
+                </div>
+                {content && (
+                  <p className="text-sm mt-2 leading-relaxed" dir="auto">
+                    {renderHighlightedText(content)}
+                  </p>
+                )}
+              </div>
             ) : (
               <div className={cn(
                 "flex flex-col items-center gap-3 p-5 rounded-lg min-w-[200px]",
@@ -212,16 +254,74 @@ export function MessageBubble({
         const videoUrl = fullMediaUrl ? `${fullMediaUrl}${fullMediaUrl.includes('?') ? '&' : '?'}retry=${retryCount}` : null;
         return (
           <div className="relative">
-            {videoUrl && !videoError ? (
+            {(videoUrl || mediaThumbnail) && !videoError ? (
               <div className="relative max-w-[300px]">
-                <video
-                  src={videoUrl}
-                  className="rounded-lg max-h-[320px] w-full"
-                  controls
-                  preload="metadata"
-                  playsInline
-                  onError={() => setVideoError(true)}
+                {/* Show thumbnail while video loads */}
+                {videoLoading && mediaThumbnail && (
+                  <div className="relative">
+                    <img
+                      src={mediaThumbnail}
+                      alt="Video preview"
+                      className="rounded-lg max-h-[320px] w-full object-cover"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-lg">
+                      <div className={cn(
+                        "w-12 h-12 rounded-full flex items-center justify-center",
+                        isOwn ? "bg-white/30" : "bg-primary/30"
+                      )}>
+                        <Video className="w-6 h-6 text-white" />
+                      </div>
+                    </div>
+                    {mediaDuration && (
+                      <span className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-0.5 rounded">
+                        {formatDuration(mediaDuration)}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {videoUrl && (
+                  <video
+                    src={videoUrl}
+                    className={cn(
+                      "rounded-lg max-h-[320px] w-full",
+                      videoLoading && mediaThumbnail && "hidden"
+                    )}
+                    controls
+                    preload="metadata"
+                    playsInline
+                    onError={() => setVideoError(true)}
+                    onLoadedData={() => setVideoLoading(false)}
+                    poster={mediaThumbnail || undefined}
+                  />
+                )}
+                {content && (
+                  <p className="text-sm mt-2 leading-relaxed" dir="auto">
+                    {renderHighlightedText(content)}
+                  </p>
+                )}
+              </div>
+            ) : mediaThumbnail ? (
+              // Show thumbnail when video is unavailable (expired)
+              <div className="relative max-w-[300px]">
+                <img
+                  src={mediaThumbnail}
+                  alt="Video preview"
+                  className="rounded-lg max-h-[320px] w-full object-cover"
                 />
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-lg">
+                  <div className="w-12 h-12 rounded-full bg-black/50 flex items-center justify-center">
+                    <Video className="w-6 h-6 text-white/70" />
+                  </div>
+                </div>
+                <div className="absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" />
+                  معاينة فقط
+                </div>
+                {mediaDuration && (
+                  <span className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-0.5 rounded">
+                    {formatDuration(mediaDuration)}
+                  </span>
+                )}
                 {content && (
                   <p className="text-sm mt-2 leading-relaxed" dir="auto">
                     {renderHighlightedText(content)}

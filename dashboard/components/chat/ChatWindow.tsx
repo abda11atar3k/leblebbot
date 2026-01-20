@@ -16,6 +16,7 @@ import {
   sendWhatsAppMessage,
   banUser,
   unbanUser,
+  registerCacheClearFn,
   Message as ApiMessage,
   ConversationDetailResponse,
   WhatsAppMessage,
@@ -35,6 +36,7 @@ interface Message {
   mediaUrl?: string | null;
   mediaMimetype?: string | null;
   mediaDuration?: number | null;
+  mediaThumbnail?: string | null;
 }
 
 interface ChatWindowProps {
@@ -45,6 +47,15 @@ interface ChatWindowProps {
 // Simple in-memory cache for messages and chat info (survives component remounts)
 const messagesCache = new Map<string, Message[]>();
 const chatInfoCache = new Map<string, WhatsAppMessagesResponse["chat"] | null>();
+
+// Function to clear ChatWindow caches - exported for use when reconnecting WhatsApp
+export function clearChatCaches() {
+  messagesCache.clear();
+  chatInfoCache.clear();
+}
+
+// Register the cache clear function
+registerCacheClearFn(clearChatCaches);
 
 export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowProps) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -66,6 +77,8 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
   const [newMessagesCount, setNewMessagesCount] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const lastMessageCountRef = useRef(0);
@@ -84,6 +97,32 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
     "هحولك لمتخصص",
     "في حاجة تانية أساعدك فيها؟",
   ];
+
+  // Common emojis for quick access
+  const commonEmojis = [
+    "😊", "😂", "❤️", "👍", "🙏", "😍", "🔥", "✨", "💯", "👋",
+    "😅", "🤣", "😭", "😎", "🥰", "😘", "🤔", "👏", "💪", "🎉",
+    "😢", "😡", "🥺", "😴", "🤝", "👌", "✅", "❌", "⭐", "💬"
+  ];
+
+  const handleEmojiClick = (emoji: string) => {
+    setInput(prev => prev + emoji);
+    setShowEmojiPicker(false);
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !conversationId) return;
+    
+    // TODO: Implement file upload to Evolution API
+    // For now, show a message
+    alert("سيتم إضافة رفع الملفات قريباً!");
+    
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
 
   // Reset paging/search when switching conversations
   useEffect(() => {
@@ -241,6 +280,7 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
             mediaUrl: msg.media_url,
             mediaMimetype: msg.media_mimetype,
             mediaDuration: msg.media_duration,
+            mediaThumbnail: msg.media_thumbnail,
           });
         }
         
@@ -343,6 +383,7 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
         mediaUrl: msg.media_url,
         mediaMimetype: msg.media_mimetype,
         mediaDuration: msg.media_duration,
+        mediaThumbnail: msg.media_thumbnail,
       });
     }
     
@@ -380,12 +421,12 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
     
     fetchPage1();
     
-    // Auto-refresh every 15 seconds (only page 1, only if not loading older)
+    // Auto-refresh every 3 seconds for near real-time updates
     const interval = setInterval(() => {
       if (!loadOlderInProgressRef.current && !loadingOlder && currentPage === 1) {
         fetchPage1();
       }
-    }, 15000);
+    }, 3000);
     
     return () => clearInterval(interval);
   }, [conversationId, isWhatsApp, formatMessages, currentPage, loadingOlder]);
@@ -827,11 +868,46 @@ export function ChatWindow({ conversationId, isWhatsApp = false }: ChatWindowPro
 
       {/* Input */}
       <div className="p-4 border-t border-border bg-surface flex-shrink-0">
+        {/* Emoji Picker */}
+        {showEmojiPicker && (
+          <div className="mb-2 p-2 bg-surface-elevated border border-border rounded-xl">
+            <div className="flex flex-wrap gap-1">
+              {commonEmojis.map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => handleEmojiClick(emoji)}
+                  className="p-1.5 hover:bg-surface rounded-lg transition-colors text-lg"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className={cn("flex items-center gap-2", isRTL && "flex-row-reverse")}>
-          <button className="p-2 text-muted hover:text-foreground hover:bg-surface-elevated rounded-xl transition-colors">
+          {/* Hidden file input */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileSelect}
+            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx"
+            className="hidden"
+          />
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            className="p-2 text-muted hover:text-foreground hover:bg-surface-elevated rounded-xl transition-colors"
+            title="إرفاق ملف"
+          >
             <Paperclip className="w-5 h-5" />
           </button>
-          <button className="p-2 text-muted hover:text-foreground hover:bg-surface-elevated rounded-xl transition-colors">
+          <button 
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className={cn(
+              "p-2 text-muted hover:text-foreground hover:bg-surface-elevated rounded-xl transition-colors",
+              showEmojiPicker && "bg-surface-elevated text-foreground"
+            )}
+            title="إضافة إيموجي"
+          >
             <Smile className="w-5 h-5" />
           </button>
           <input

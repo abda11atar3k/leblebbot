@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import { isPhoneLike } from "@/lib/formatters/phone";
 import {
   Mail,
   Phone,
@@ -37,6 +38,10 @@ interface CustomerData {
   conversations?: number;
   avgResponseTime?: string;
   tags: string[];
+  profilePic?: string | null;
+  isGroup?: boolean;
+  pushName?: string;
+  status?: string;
 }
 
 export function CustomerInfo({ conversationId, isWhatsApp = false }: CustomerInfoProps) {
@@ -59,7 +64,9 @@ export function CustomerInfo({ conversationId, isWhatsApp = false }: CustomerInf
         setCustomer({
           name: data.chat.name || data.chat.phone,
           phone: data.chat.phone,
-          tags: data.chat.is_group ? ["Group"] : ["WhatsApp"],
+          tags: data.chat.is_group ? ["مجموعة"] : ["واتساب"],
+          profilePic: data.chat.profile_pic,
+          isGroup: data.chat.is_group,
         });
       } else {
         // For MongoDB conversations, get full user info
@@ -118,8 +125,20 @@ export function CustomerInfo({ conversationId, isWhatsApp = false }: CustomerInf
     )}>
       {/* Header */}
       <div className="p-4 border-b border-border text-center">
-        <Avatar name={displayCustomer.name} size="xl" className="mx-auto mb-3" />
-        <h3 className="font-semibold text-foreground">{displayCustomer.name}</h3>
+        {displayCustomer.profilePic ? (
+          <img 
+            src={displayCustomer.profilePic} 
+            alt={displayCustomer.name}
+            className="w-20 h-20 rounded-full mx-auto mb-3 object-cover border-2 border-border"
+          />
+        ) : (
+          <Avatar name={displayCustomer.name} size="xl" className="mx-auto mb-3" />
+        )}
+        <h3 className="font-semibold text-foreground" dir="ltr">
+          {isPhoneLike(displayCustomer.name) || /^\d+$/.test(displayCustomer.name) 
+            ? `+${displayCustomer.name.replace(/^\+/, '')}` 
+            : displayCustomer.name}
+        </h3>
         {displayCustomer.email && (
           <p className="text-sm text-muted">{displayCustomer.email}</p>
         )}
@@ -129,11 +148,6 @@ export function CustomerInfo({ conversationId, isWhatsApp = false }: CustomerInf
               {tag}
             </Badge>
           ))}
-          {isWhatsApp && (
-            <Badge variant="secondary" size="sm">
-              Evolution API
-            </Badge>
-          )}
         </div>
       </div>
 
@@ -153,7 +167,7 @@ export function CustomerInfo({ conversationId, isWhatsApp = false }: CustomerInf
           isRTL && "flex-row-reverse"
         )}>
           <Phone className="w-4 h-4 text-muted" />
-          <span className="text-foreground">{displayCustomer.phone || "غير متوفر"}</span>
+          <span className="text-foreground" dir="ltr">{displayCustomer.phone ? `+${displayCustomer.phone.replace(/^\+/, '')}` : "غير متوفر"}</span>
         </div>
         {displayCustomer.location && (
           <div className={cn(

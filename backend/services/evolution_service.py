@@ -6,60 +6,27 @@ Queries Evolution API directly for WhatsApp statistics and real-time data.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-import aiohttp
-
-from config import get_settings
+from services.evolution_client import EvolutionClient
 
 logger = logging.getLogger(__name__)
 
+# Instance stats cache (10 second TTL)
+_instance_stats_cache = {"data": None, "timestamp": 0, "ttl": 10}
 
-class EvolutionService:
+
+class EvolutionService(EvolutionClient):
     """
     Service for querying Evolution API directly for statistics.
     Provides real-time WhatsApp data including messages, contacts, and chats.
+    Inherits connection pooling from EvolutionClient.
     """
 
     def __init__(self, instance_name: Optional[str] = None) -> None:
-        self.settings = get_settings()
-        self.base_url = self.settings.evolution_api_url.rstrip("/")
-        self.api_key = self.settings.evolution_api_key
-        self.instance_name = instance_name or self.settings.evolution_instance_name
-
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        payload: Optional[dict] = None,
-        timeout: int = 30
-    ) -> dict:
-        """Make HTTP request to Evolution API"""
-        headers = {
-            "apikey": self.api_key,
-            "Content-Type": "application/json"
-        }
-        url = f"{self.base_url}{path}"
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method,
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response:
-                    data = await response.json(content_type=None)
-                    return {
-                        "success": response.status in (200, 201),
-                        "status": response.status,
-                        "data": data
-                    }
-        except Exception as e:
-            logger.error(f"Evolution API request error: {e}")
-            return {"success": False, "error": str(e)}
+        super().__init__(instance_name)
 
     async def get_all_instances(self) -> list[dict]:
         """Get all WhatsApp instances and their stats"""
@@ -69,8 +36,22 @@ class EvolutionService:
             return result["data"]
         return []
 
-    async def get_instance_stats(self) -> dict:
-        """Get statistics for a specific instance"""
+    async def get_instance_stats(self, use_cache: bool = True) -> dict:
+        """
+        Get statistics for a specific instance with caching.
+        
+        Args:
+            use_cache: Whether to use cached data (default True, 10s TTL)
+        """
+        global _instance_stats_cache
+        
+        current_time = time.time()
+        
+        # Check cache first
+        if use_cache and _instance_stats_cache["data"]:
+            if (current_time - _instance_stats_cache["timestamp"]) < _instance_stats_cache["ttl"]:
+                return _instance_stats_cache["data"]
+        
         result = await self._request(
             "GET",
             f"/instance/fetchInstances?instanceName={self.instance_name}"
@@ -81,7 +62,7 @@ class EvolutionService:
             if instances:
                 inst = instances[0]
                 counts = inst.get("_count", {})
-                return {
+                stats = {
                     "success": True,
                     "instance_name": inst.get("name", self.instance_name),
                     "connected": inst.get("connectionStatus") == "open",
@@ -93,6 +74,12 @@ class EvolutionService:
                     "profile_name": inst.get("profileName"),
                     "profile_picture": inst.get("profilePicUrl"),
                 }
+                
+                # Update cache
+                _instance_stats_cache["data"] = stats
+                _instance_stats_cache["timestamp"] = current_time
+                
+                return stats
         
         return {
             "success": False,
@@ -103,20 +90,24 @@ class EvolutionService:
             "messages": 0
         }
 
-    async def get_platform_stats(self) -> dict:
+    async def get_platform_stats(self, instance_stats: dict = None) -> dict:
         """
         Get message counts broken down by platform.
         Currently only WhatsApp is supported via Evolution API.
+        
+        Args:
+            instance_stats: Pre-fetched instance stats to avoid redundant API call
         """
-        # Get WhatsApp stats from Evolution API
-        whatsapp_stats = await self.get_instance_stats()
+        # Use provided stats or fetch (will use cache if available)
+        if instance_stats is None:
+            instance_stats = await self.get_instance_stats()
         
         return {
             "whatsapp": {
-                "total": whatsapp_stats.get("messages", 0),
-                "contacts": whatsapp_stats.get("contacts", 0),
-                "chats": whatsapp_stats.get("chats", 0),
-                "connected": whatsapp_stats.get("connected", False),
+                "total": instance_stats.get("messages", 0),
+                "contacts": instance_stats.get("contacts", 0),
+                "chats": instance_stats.get("chats", 0),
+                "connected": instance_stats.get("connected", False),
                 "today": 0  # Would need message timestamps to calculate
             },
             "messenger": {
@@ -145,14 +136,16 @@ class EvolutionService:
     async def get_live_stats(self) -> dict:
         """
         Get real-time statistics for the monitor dashboard.
+        Uses single API call - instance stats are cached.
         """
+        # Single API call (uses cache if available)
         instance_stats = await self.get_instance_stats()
-        platform_stats = await self.get_platform_stats()
         
-        # Calculate total active conversations (chats with recent messages)
+        # Calculate totals from the same data
         total_messages = instance_stats.get("messages", 0)
         total_contacts = instance_stats.get("contacts", 0)
         total_chats = instance_stats.get("chats", 0)
+        is_connected = instance_stats.get("connected", False)
         
         return {
             "total_messages": total_messages,
@@ -162,8 +155,9 @@ class EvolutionService:
             "messages_today": 0,  # Would need timestamp filtering
             "platforms": {
                 "whatsapp": {
-                    "active": 1 if instance_stats.get("connected") else 0,
-                    "total": total_messages
+                    "active": 1 if is_connected else 0,
+                    "total": total_messages,
+                    "connected": is_connected
                 },
                 "messenger": {
                     "active": 0,
@@ -179,7 +173,7 @@ class EvolutionService:
                 }
             },
             "sync_status": {
-                "connected": instance_stats.get("connected", False),
+                "connected": is_connected,
                 "connection_status": instance_stats.get("connection_status", "unknown"),
                 "last_sync": datetime.utcnow().isoformat(),
                 "instance_name": instance_stats.get("instance_name"),
@@ -201,7 +195,11 @@ class EvolutionService:
         return []
 
     async def get_chats(self, limit: int = 50) -> list[dict]:
-        """Get recent chats from Evolution API"""
+        """Get recent chats from Evolution API.
+        
+        Uses findMessages as fallback since findChats has a bug with null mediaUrl.
+        """
+        # Try findChats first
         result = await self._request(
             "POST",
             f"/chat/findChats/{self.instance_name}",
@@ -210,8 +208,76 @@ class EvolutionService:
         
         if result.get("success") and result.get("data"):
             chats = result["data"]
-            return chats[:limit] if isinstance(chats, list) else []
-        return []
+            if isinstance(chats, list) and len(chats) > 0:
+                return chats[:limit]
+        
+        # Fallback: Build chats from recent messages
+        # This is a workaround for Evolution API bug with null mediaUrl
+        logger.info("findChats failed, building chat list from messages")
+        
+        # Fetch multiple pages to get more unique chats
+        all_records = []
+        target_chats = min(limit * 2, 200)  # Target number of unique chats
+        chats_found = set()
+        
+        for page in range(1, 11):  # Max 10 pages
+            messages_result = await self._request(
+                "POST",
+                f"/chat/findMessages/{self.instance_name}",
+                {"limit": 100, "page": page}
+            )
+            
+            if not messages_result.get("success"):
+                break
+            
+            messages_data = messages_result.get("data", {})
+            records = messages_data.get("messages", {}).get("records", [])
+            
+            if not records:
+                break
+            
+            all_records.extend(records)
+            
+            # Count unique chats
+            for m in records:
+                jid = m.get("key", {}).get("remoteJid", "")
+                if jid:
+                    chats_found.add(jid)
+            
+            # Stop if we have enough unique chats
+            if len(chats_found) >= target_chats:
+                break
+        
+        records = all_records
+        
+        # Build chat list from messages (deduplicate by remoteJid)
+        chats_map = {}
+        for msg in records:
+            key = msg.get("key", {})
+            remote_jid = key.get("remoteJid", "")
+            if not remote_jid or remote_jid in chats_map:
+                continue
+            
+            # Create chat entry from message
+            chats_map[remote_jid] = {
+                "remoteJid": remote_jid,
+                "name": msg.get("pushName", ""),
+                "unreadCount": 0,
+                "lastMessage": {
+                    "key": key,
+                    "message": msg.get("message"),
+                    "messageTimestamp": msg.get("messageTimestamp"),
+                    "pushName": msg.get("pushName")
+                },
+                "profilePicUrl": None,
+                "updatedAt": msg.get("updatedAt")
+            }
+        
+        # Sort by timestamp (most recent first)
+        chats = list(chats_map.values())
+        chats.sort(key=lambda x: x.get("lastMessage", {}).get("messageTimestamp", 0), reverse=True)
+        
+        return chats[:limit]
 
     async def get_messages(
         self, 
@@ -397,6 +463,35 @@ class EvolutionService:
         
         # Also check if data is directly in result (some API versions)
         if result.get("id") and result.get("subject"):
+            return result
+        
+        return {}
+
+    async def get_contact_profile(self, phone_number: str) -> dict:
+        """
+        Get contact profile including profile picture.
+        
+        Args:
+            phone_number: Phone number (e.g., "201274903108")
+            
+        Returns:
+            Dict with profile info including name, picture, status
+        """
+        # Clean the phone number
+        clean_number = phone_number.replace("@s.whatsapp.net", "").replace("+", "")
+        
+        result = await self._request(
+            "POST",
+            f"/chat/fetchProfile/{self.instance_name}",
+            {"number": clean_number},
+            timeout=10
+        )
+        
+        if result.get("success") and result.get("data"):
+            return result["data"]
+        
+        # Also check if data is directly in result
+        if result.get("wuid") or result.get("picture"):
             return result
         
         return {}

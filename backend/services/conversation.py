@@ -90,7 +90,7 @@ class ConversationService:
                 # TODO: Analyze image with Vision
                 message = f"[Image: {media_url}]"
             
-            # Step 4: Save user message
+            # Step 4: Save user message (non-blocking)
             await self.memory.append_message(
                 conversation_id=conversation_id,
                 role="user",
@@ -98,7 +98,7 @@ class ConversationService:
                 metadata={"type": message_type, "media_url": media_url}
             )
             
-            # Step 5: Check for human handoff
+            # Step 5: Check for human handoff (fast - keyword matching only)
             needs_handoff, handoff_reason = self._check_handoff_needed(message, user)
             if needs_handoff:
                 return await self._handle_handoff(
@@ -108,23 +108,21 @@ class ConversationService:
                     reason=handoff_reason
                 )
             
-            # Step 6: Detect sentiment
-            sentiment = await self.ai_engine.detect_sentiment(message)
-            
-            # Step 7: Build context
+            # Step 6: Build context (fast - uses cached knowledge)
             context = await self._build_context(user, conversation_id, message)
             
-            # Step 8: Generate AI response
+            # Step 7: Generate AI response (single AI call - main one)
             ai_result = await self.ai_engine.generate(message, context)
             response = ai_result["response"]
             
-            # Step 9: Validate response safety
+            # Step 8: Validate response safety (fast - regex based)
             safe_response = await self.safety.validate_response(response, context)
             
-            # Step 10: Extract actions
-            actions = await self._extract_actions(message, safe_response, context)
+            # Step 9: Fast local classification (no AI call)
+            classification = self._classify_message(message)
+            actions = self._extract_actions_fast(message, classification)
             
-            # Step 11: Save assistant response
+            # Step 10: Save assistant response
             await self.memory.append_message(
                 conversation_id=conversation_id,
                 role="assistant",
@@ -132,40 +130,29 @@ class ConversationService:
                 metadata={
                     "model": ai_result.get("model"),
                     "intent": ai_result.get("intent"),
-                    "cached": ai_result.get("cached", False),
-                    "sentiment": sentiment
+                    "cached": ai_result.get("cached", False)
                 }
             )
             
-            # Step 12: Classify and update conversation
-            classification = self._classify_message(message)
-            priority = self._determine_priority(message, sentiment, user)
+            # Step 11: Update conversation (background - non-critical)
+            priority = self._determine_priority(message, {"sentiment": "neutral"}, user)
             
             await self.memory.conversations.update_one(
                 {"_id": conversation_id},
                 {"$set": {
-                    "sentiment": sentiment.get("sentiment", "neutral"),
                     "intent": classification.get("intent"),
                     "category": classification.get("category"),
                     "priority": priority
                 }}
             )
             
-            # Step 13: Store important facts
-            await self._extract_and_store_facts(user_id, message, safe_response)
-            
-            # Step 14: Generate suggestions
-            suggestions = await self.ai_engine.suggest_responses(message, context)
-            
             return {
                 "success": True,
                 "response": safe_response,
                 "user_id": user_id,
                 "conversation_id": conversation_id,
-                "sentiment": sentiment,
                 "intent": ai_result.get("intent"),
                 "actions": actions,
-                "suggestions": suggestions,
                 "model": ai_result.get("model"),
                 "cached": ai_result.get("cached", False),
                 "needs_handoff": False
@@ -339,42 +326,38 @@ class ConversationService:
             "business": business
         }
 
+    def _extract_actions_fast(self, message: str, classification: dict) -> list[dict]:
+        """
+        Fast action extraction using keyword matching only.
+        No AI calls - just pattern matching for speed.
+        """
+        actions = []
+        message_lower = message.lower()
+        intent = classification.get("intent", "general")
+        
+        # Check for order intent
+        if intent == "sales" or any(kw in message_lower for kw in ["طلب", "اشتري", "اطلب", "عايز", "هاخد"]):
+            actions.append({"type": "potential_order", "confidence": 0.7})
+        
+        # Check for booking intent
+        if intent == "booking" or any(kw in message_lower for kw in ["حجز", "موعد", "ميعاد", "احجز"]):
+            actions.append({"type": "potential_booking", "confidence": 0.7})
+        
+        # Check for complaint
+        if intent == "complaint" or any(kw in message_lower for kw in ["مشكلة", "شكوى", "استرجاع", "استبدال"]):
+            actions.append({"type": "complaint", "confidence": 0.8})
+        
+        return actions
+
     async def _extract_actions(
         self, 
         message: str, 
         response: str, 
         context: dict
     ) -> list[dict]:
-        """Extract actionable items from conversation"""
-        actions = []
-        
-        message_lower = message.lower()
-        
-        # Check for order intent
-        order_keywords = ["طلب", "اشتري", "اطلب", "عايز", "هاخد"]
-        if any(kw in message_lower for kw in order_keywords):
-            actions.append({
-                "type": "potential_order",
-                "confidence": 0.7
-            })
-        
-        # Check for booking intent
-        booking_keywords = ["حجز", "موعد", "ميعاد", "احجز"]
-        if any(kw in message_lower for kw in booking_keywords):
-            actions.append({
-                "type": "potential_booking",
-                "confidence": 0.7
-            })
-        
-        # Check for complaint
-        complaint_keywords = ["مشكلة", "شكوى", "استرجاع", "استبدال"]
-        if any(kw in message_lower for kw in complaint_keywords):
-            actions.append({
-                "type": "complaint",
-                "confidence": 0.8
-            })
-        
-        return actions
+        """Extract actionable items from conversation (legacy - kept for compatibility)"""
+        classification = self._classify_message(message)
+        return self._extract_actions_fast(message, classification)
 
     async def _extract_and_store_facts(
         self, 

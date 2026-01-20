@@ -9,6 +9,7 @@ from connectors.telegram import TelegramConnector
 from services.conversation import ConversationService
 from services.safety_service import SafetyService
 from services.ws_manager import broadcast_event
+from api.routes import clear_all_whatsapp_cache
 
 logger = logging.getLogger(__name__)
 
@@ -211,21 +212,74 @@ async def evolution_global_webhook(request: Request, background_tasks: Backgroun
     """
     Global webhook endpoint for Evolution API.
     Routes to appropriate handler based on instance.
+    Handles all Evolution API events including message status updates.
     """
     try:
         payload = await request.json()
         instance = payload.get("instance")
         event = payload.get("event")
+        data = payload.get("data", {})
         
         logger.info(f"Evolution webhook: {event} for {instance}")
         
-        # Route to WhatsApp handler
-        if event in ["messages.upsert", "connection.update", "qrcode.updated"]:
+        # ============================================
+        # Message Events
+        # ============================================
+        
+        # New incoming message
+        if event == "messages.upsert":
             return await whatsapp_webhook(request, background_tasks)
         
-        # Presence/typing updates (if provided by Evolution)
+        # Message status update (sent, delivered, read)
+        if event == "messages.update":
+            return await handle_message_status_update(data)
+        
+        # Sent message confirmation
+        if event == "send.message":
+            return await handle_sent_message(data)
+        
+        # Message deleted
+        if event == "messages.delete":
+            logger.info(f"Message deleted: {data}")
+            await broadcast_event("message_deleted", data)
+            return {"status": "ok", "event": event}
+        
+        # ============================================
+        # Connection Events
+        # ============================================
+        
+        if event == "connection.update":
+            state = data.get("state")
+            logger.info(f"WhatsApp connection state: {state}")
+            
+            # Clear cache on disconnect to force fresh data on reconnect
+            if state == "close":
+                logger.info("Connection closed, clearing caches...")
+                clear_all_whatsapp_cache()
+            
+            # Broadcast connection state to dashboard
+            await broadcast_event("connection_status", {
+                "state": state,
+                "instance": instance
+            })
+            
+            return {"status": "ok", "state": state}
+        
+        # QR code updated
+        if event == "qrcode.updated":
+            logger.info("WhatsApp QR code updated")
+            qr_data = data.get("qrcode", {})
+            await broadcast_event("qr_updated", {
+                "base64": qr_data.get("base64") if isinstance(qr_data, dict) else qr_data,
+                "instance": instance
+            })
+            return {"status": "ok", "qr_updated": True}
+        
+        # ============================================
+        # Presence/Typing Events
+        # ============================================
+        
         if event in ["presence.update", "presence.upsert", "presence.changed", "presence.set"]:
-            data = payload.get("data", {}) or {}
             remote_jid = (
                 data.get("id")
                 or data.get("remoteJid")
@@ -240,8 +294,87 @@ async def evolution_global_webhook(request: Request, background_tasks: Backgroun
                 })
             return {"status": "ok", "event": event}
         
+        # ============================================
+        # Call Events (optional)
+        # ============================================
+        
+        if event == "call":
+            call_data = data.get("call", data)
+            logger.info(f"Call event: {call_data}")
+            await broadcast_event("call", call_data)
+            return {"status": "ok", "event": event}
+        
+        # Unknown event - log but don't fail
+        logger.debug(f"Unhandled Evolution event: {event}")
         return {"status": "ignored", "event": event}
         
     except Exception as e:
         logger.error(f"Evolution webhook error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def handle_message_status_update(data: dict) -> dict:
+    """
+    Handle message delivery status updates.
+    Status codes: 0=pending, 1=sent, 2=delivered, 3=read, 4=played (for voice)
+    """
+    try:
+        key = data.get("key", {})
+        status = data.get("status") or data.get("update", {}).get("status")
+        
+        message_id = key.get("id")
+        remote_jid = key.get("remoteJid")
+        from_me = key.get("fromMe", False)
+        
+        if message_id and status is not None:
+            status_map = {
+                0: "pending",
+                1: "sent",
+                2: "delivered", 
+                3: "read",
+                4: "played"
+            }
+            status_name = status_map.get(status, str(status))
+            
+            logger.debug(f"Message {message_id} status: {status_name}")
+            
+            # Broadcast to dashboard for real-time status updates
+            await broadcast_event("message_status", {
+                "message_id": message_id,
+                "remote_jid": remote_jid,
+                "from_me": from_me,
+                "status": status,
+                "status_name": status_name
+            })
+        
+        return {"status": "ok", "event": "messages.update"}
+    except Exception as e:
+        logger.error(f"Error handling message status update: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def handle_sent_message(data: dict) -> dict:
+    """
+    Handle confirmation of sent messages.
+    Useful for tracking outgoing messages sent from the phone.
+    """
+    try:
+        key = data.get("key", {})
+        message = data.get("message", {})
+        
+        message_id = key.get("id")
+        remote_jid = key.get("remoteJid")
+        
+        logger.debug(f"Sent message confirmed: {message_id} to {remote_jid}")
+        
+        # Broadcast to dashboard
+        await broadcast_event("message_sent", {
+            "message_id": message_id,
+            "remote_jid": remote_jid,
+            "message_type": data.get("messageType", "text")
+        })
+        
+        return {"status": "ok", "event": "send.message"}
+    except Exception as e:
+        logger.error(f"Error handling sent message: {e}")
         return {"status": "error", "message": str(e)}

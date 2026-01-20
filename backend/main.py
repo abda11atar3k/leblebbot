@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down LeblebBot API...")
     
+    # Close Evolution API HTTP session
+    try:
+        from services.evolution_client import EvolutionClient
+        await EvolutionClient.close_session()
+        logger.info("Evolution API session closed")
+    except Exception as e:
+        logger.warning(f"Error closing Evolution API session: {e}")
+    
     # Close WebSocket connections
     for connection in manager.active_connections.copy():
         try:

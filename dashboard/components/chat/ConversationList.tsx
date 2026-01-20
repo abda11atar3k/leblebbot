@@ -153,8 +153,8 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
   useEffect(() => {
     loadConversations();
     
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(loadConversations, 10000);
+    // Auto-refresh every 5 seconds for faster updates
+    const interval = setInterval(loadConversations, 5000);
     return () => clearInterval(interval);
   }, [loadConversations]);
 
@@ -247,18 +247,21 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
             key={p}
             onClick={() => setPlatformFilter(p)}
             className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap transition-colors duration-150",
+              "flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-lg whitespace-nowrap transition-colors duration-150 flex-shrink-0",
               platformFilter === p
                 ? "bg-primary text-white shadow-soft"
                 : "text-muted hover:text-foreground hover:bg-surface-elevated"
             )}
           >
-            <span>{platformLabels[p].icon}</span>
-            {platformLabels[p].label}
+            <span className="text-sm">{platformLabels[p].icon}</span>
+            <span className="hidden sm:inline">{platformLabels[p].label}</span>
             {p === "whatsapp" && whatsappCount > 0 && (
-              <Badge variant="secondary" size="sm" className="ml-1">
+              <span className={cn(
+                "text-[10px] px-1.5 py-0.5 rounded-full",
+                platformFilter === p ? "bg-white/20" : "bg-primary/10 text-primary"
+              )}>
                 {whatsappCount}
-              </Badge>
+              </span>
             )}
           </button>
         ))}

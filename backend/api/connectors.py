@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -6,6 +7,9 @@ from pydantic import BaseModel
 from connectors.whatsapp import WhatsAppConnector
 from connectors.messenger import MessengerConnector
 from connectors.telegram import TelegramConnector
+from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/connectors")
 
@@ -109,9 +113,19 @@ async def disconnect(
     connector_type: str,
     instance_name: Optional[str] = Query(None)
 ):
-    """Disconnect from connector"""
+    """Disconnect from connector - deletes instance completely for fresh start"""
     connector = _get_connector(connector_type, instance_name)
-    return await connector.disconnect()
+    
+    # For WhatsApp, use logout() which does logout + delete instance
+    if connector_type == "whatsapp":
+        result = await connector.logout()
+        # Clear all WhatsApp caches
+        from api.routes import clear_all_whatsapp_cache
+        clear_all_whatsapp_cache()
+    else:
+        result = await connector.disconnect()
+    
+    return result
 
 
 @router.get("/{connector_type}/qr")
@@ -143,7 +157,29 @@ async def logout(
         )
     
     connector = _get_connector(connector_type, instance_name)
-    return await connector.logout()
+    result = await connector.logout()
+    
+    # Clear all WhatsApp caches when logging out
+    from api.routes import clear_all_whatsapp_cache
+    clear_all_whatsapp_cache()
+    
+    return result
+
+
+@router.post("/{connector_type}/clear-cache")
+async def clear_cache(
+    connector_type: str,
+    instance_name: Optional[str] = Query(None)
+):
+    """Clear all caches for the connector"""
+    if connector_type != "whatsapp":
+        raise HTTPException(
+            status_code=400, 
+            detail="Cache clearing only available for WhatsApp"
+        )
+    
+    from api.routes import clear_all_whatsapp_cache
+    return clear_all_whatsapp_cache()
 
 
 @router.post("/{connector_type}/send")
@@ -205,3 +241,98 @@ async def get_sync_status(
     
     connector = _get_connector(connector_type, instance_name)
     return await connector.get_sync_status()
+
+
+@router.post("/{connector_type}/setup-webhook")
+async def setup_webhook(
+    connector_type: str,
+    webhook_url: str = Query(..., description="Your server's webhook URL (e.g., https://yourdomain.com/webhook/evolution)"),
+    instance_name: Optional[str] = Query(None)
+):
+    """
+    Configure Evolution API webhook to receive messages.
+    This is REQUIRED to receive incoming WhatsApp messages.
+    
+    Example webhook_url: https://yourdomain.com/webhook/evolution
+    """
+    if connector_type != "whatsapp":
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook setup only available for WhatsApp"
+        )
+    
+    connector = _get_connector(connector_type, instance_name)
+    
+    # Configure webhook in Evolution API
+    payload = {
+        "webhook": {
+            "enabled": True,
+            "url": webhook_url,
+            "webhookByEvents": False,
+            "webhookBase64": False,
+            "events": [
+                "MESSAGES_UPSERT",
+                "MESSAGES_UPDATE", 
+                "MESSAGES_DELETE",
+                "SEND_MESSAGE",
+                "CONNECTION_UPDATE",
+                "QRCODE_UPDATED",
+                "PRESENCE_UPDATE"
+            ]
+        }
+    }
+    
+    result = await connector._request(
+        "POST",
+        f"/webhook/set/{connector.instance_name}",
+        payload
+    )
+    
+    if result.get("success"):
+        logger.info(f"Webhook configured: {webhook_url}")
+        return {
+            "success": True,
+            "message": f"Webhook configured successfully",
+            "webhook_url": webhook_url,
+            "events": payload["webhook"]["events"]
+        }
+    else:
+        logger.error(f"Failed to configure webhook: {result}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to configure webhook: {result.get('error', 'Unknown error')}"
+        )
+
+
+@router.get("/{connector_type}/webhook-status")
+async def get_webhook_status(
+    connector_type: str,
+    instance_name: Optional[str] = Query(None)
+):
+    """Check current webhook configuration"""
+    if connector_type != "whatsapp":
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook status only available for WhatsApp"
+        )
+    
+    connector = _get_connector(connector_type, instance_name)
+    
+    result = await connector._request(
+        "GET",
+        f"/webhook/find/{connector.instance_name}"
+    )
+    
+    if result.get("success"):
+        data = result.get("data", {})
+        webhook_info = data.get("webhook") if isinstance(data, dict) else data
+        return {
+            "success": True,
+            "webhook": webhook_info
+        }
+    else:
+        return {
+            "success": False,
+            "message": "No webhook configured",
+            "error": result.get("error")
+        }

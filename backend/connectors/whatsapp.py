@@ -6,66 +6,26 @@ import random
 from datetime import datetime
 from typing import Any, Optional
 
-import aiohttp
-
-from config import get_settings
 from connectors.base import BaseConnector
+from services.evolution_client import EvolutionClient
 
 logger = logging.getLogger(__name__)
 
 
-class WhatsAppConnector(BaseConnector):
+class WhatsAppConnector(EvolutionClient, BaseConnector):
     """
     WhatsApp connector using Evolution API.
     Includes typing simulation, rate limiting, and message variation.
+    Inherits connection pooling from EvolutionClient.
     """
 
     connector_type = "whatsapp"
 
     def __init__(self, instance_name: Optional[str] = None) -> None:
-        self.settings = get_settings()
-        self.base_url = self.settings.evolution_api_url.rstrip("/")
-        self.api_key = self.settings.evolution_api_key
-        self.instance_name = instance_name or self.settings.evolution_instance_name
+        EvolutionClient.__init__(self, instance_name)
         
         # Rate limiting state
         self._message_counts = {}  # {number: {hour: count, day: count}}
-        
-    async def _request(
-        self, 
-        method: str, 
-        path: str, 
-        payload: Optional[dict] = None,
-        timeout: int = 30
-    ) -> dict:
-        """Make HTTP request to Evolution API"""
-        headers = {
-            "apikey": self.api_key,
-            "Content-Type": "application/json"
-        }
-        url = f"{self.base_url}{path}"
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method, 
-                    url, 
-                    json=payload, 
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response:
-                    data = await response.json(content_type=None)
-                    return {
-                        "success": response.status in (200, 201),
-                        "status": response.status,
-                        "data": data
-                    }
-        except asyncio.TimeoutError:
-            logger.error(f"Request timeout: {url}")
-            return {"success": False, "error": "timeout"}
-        except Exception as e:
-            logger.error(f"Request error: {e}")
-            return {"success": False, "error": str(e)}
 
     # ===================
     # Instance Management
@@ -84,7 +44,40 @@ class WhatsAppConnector(BaseConnector):
             "readStatus": True,
             "syncFullHistory": True  # Enable full history sync
         }
-        return await self._request("POST", "/instance/create", payload)
+        result = await self._request("POST", "/instance/create", payload)
+        
+        # Auto-setup webhook after instance creation
+        if result.get("success"):
+            await self.setup_webhook()
+        
+        return result
+    
+    async def setup_webhook(self) -> dict:
+        """Configure webhook to receive real-time message events"""
+        payload = {
+            "webhook": {
+                "enabled": True,
+                "url": "http://backend:8000/webhook/evolution",
+                "webhookByEvents": False,
+                "webhookBase64": False,
+                "events": [
+                    "MESSAGES_UPSERT",
+                    "MESSAGES_UPDATE",
+                    "SEND_MESSAGE",
+                    "CONNECTION_UPDATE"
+                ]
+            }
+        }
+        result = await self._request(
+            "POST",
+            f"/webhook/set/{self.instance_name}",
+            payload
+        )
+        if result.get("success"):
+            logger.info(f"Webhook configured for instance {self.instance_name}")
+        else:
+            logger.warning(f"Failed to configure webhook: {result}")
+        return result
 
     async def connect(self) -> dict:
         """Connect/create instance and get QR code"""
@@ -92,14 +85,22 @@ class WhatsAppConnector(BaseConnector):
         status = await self.status()
         
         if status.get("connected"):
+            # Ensure webhook is configured even for existing connections
+            await self.setup_webhook()
             return {"success": True, "already_connected": True, **status}
         
-        if not status.get("success") or status.get("state") == "unknown":
-            # Create new instance
+        # Create new instance if not found or unknown state
+        state = status.get("state", "unknown")
+        if not status.get("success") or state in ("unknown", "not_found", "close"):
+            logger.info(f"Instance state is '{state}', creating new instance...")
             create_result = await self.create_instance()
             if not create_result.get("success"):
                 logger.error(f"Failed to create instance: {create_result}")
                 return create_result
+            logger.info(f"Instance created successfully")
+        else:
+            # Instance exists but not connected - ensure webhook is setup
+            await self.setup_webhook()
         
         # Get QR code for connection
         return await self.get_qr_code()
@@ -112,11 +113,27 @@ class WhatsAppConnector(BaseConnector):
         )
 
     async def logout(self) -> dict:
-        """Logout from WhatsApp (keep instance)"""
-        return await self._request(
+        """Logout from WhatsApp and delete instance completely (fresh start)"""
+        # First logout from WhatsApp
+        logout_result = await self._request(
             "DELETE",
             f"/instance/logout/{self.instance_name}"
         )
+        
+        # Then delete the instance completely to remove all old data
+        delete_result = await self._request(
+            "DELETE", 
+            f"/instance/delete/{self.instance_name}"
+        )
+        
+        logger.info(f"Instance {self.instance_name} logged out and deleted for fresh start")
+        
+        return {
+            "success": True,
+            "logout": logout_result,
+            "delete": delete_result,
+            "message": "Instance deleted. Ready for new connection."
+        }
 
     async def status(self) -> dict:
         """Get instance connection status"""
@@ -495,33 +512,32 @@ class WhatsAppConnector(BaseConnector):
     # ===================
 
     async def _simulate_typing(self, to: str, message: str) -> None:
-        """Simulate human typing behavior"""
+        """
+        Simulate human typing behavior.
+        Optimized for faster response while still appearing natural.
+        """
         if not self.settings.typing_simulation:
             return
         
         # Calculate typing time based on message length
         chars = len(message)
-        typing_speed = self.settings.typing_speed  # chars per second
+        typing_speed = self.settings.typing_speed  # chars per second (default: 15)
         
         base_time = chars / typing_speed
         
-        # Add randomness
-        variance = base_time * random.uniform(-0.2, 0.3)
-        thinking_time = random.uniform(1, 3)
+        # Add small randomness (reduced from before)
+        variance = base_time * random.uniform(-0.1, 0.15)
+        thinking_time = random.uniform(0.3, 0.8)  # Reduced from 1-3 seconds
         
         total_time = thinking_time + base_time + variance
         
-        # Cap at reasonable limits
-        total_time = min(total_time, 20)  # Max 20 seconds
-        total_time = max(total_time, self.settings.min_response_delay)
+        # Cap at reasonable limits - much faster now
+        total_time = min(total_time, self.settings.max_response_delay)  # Max 4 seconds
+        total_time = max(total_time, self.settings.min_response_delay)  # Min 0.5 seconds
         
-        # Send typing indicator in chunks
-        elapsed = 0
-        while elapsed < total_time:
-            await self.set_presence(to, "composing")
-            chunk = min(4, total_time - elapsed)
-            await asyncio.sleep(chunk)
-            elapsed += chunk
+        # Send single typing indicator and wait
+        await self.set_presence(to, "composing")
+        await asyncio.sleep(total_time)
 
     def _vary_message(self, message: str) -> str:
         """Add slight variations to message"""

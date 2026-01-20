@@ -34,6 +34,7 @@ import {
   ConnectorStatus,
   ConnectorSyncStatus,
 } from "@/lib/api/connectors";
+import { clearAllWhatsAppCaches } from "@/lib/api/conversations";
 
 interface ConnectorWithStatus extends ConnectorInfo {
   connectionStatus?: ConnectorStatus;
@@ -207,6 +208,11 @@ export default function ConnectorsPage() {
   const handleDisconnect = async (connectorType: string) => {
     if (connectorType === "whatsapp") {
       await logoutWhatsApp();
+      // Clear all WhatsApp caches when logging out
+      await clearAllWhatsAppCaches();
+      // Reload page to clear all React state
+      window.location.reload();
+      return;
     } else {
       await disconnectConnector(connectorType);
     }
