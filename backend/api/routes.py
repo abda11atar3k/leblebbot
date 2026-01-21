@@ -783,12 +783,13 @@ def clean_phone_number(jid: str) -> str:
 
 @router.get("/whatsapp/chats")
 async def get_whatsapp_chats(
-    limit: int = Query(50, le=200),
+    limit: int = Query(50, le=500),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
     search: Optional[str] = Query(None, description="Search by name or phone"),
     show_banned: bool = Query(False, description="Include banned users")
 ):
     """
-    Get all WhatsApp chats directly from Evolution API.
+    Get all WhatsApp chats directly from Evolution API with pagination.
     Returns chats with last message preview, profile pics, proper names, and unread counts.
     Deduplicates by remoteJid and merges contact names.
     Uses cached contacts for faster loading.
@@ -799,8 +800,8 @@ async def get_whatsapp_chats(
     # Get cached contacts for name resolution (fast!)
     contacts_map = await get_cached_contacts()
     
-    # Fetch chats
-    chats = await evolution_service.get_chats(limit=limit * 2)  # Fetch more to account for dedup
+    # Fetch all chats (pagination is applied after processing)
+    chats = await evolution_service.get_chats(limit=5000)  # Get all for proper pagination
     
     # Get banned users from MongoDB
     banned_users = set()
@@ -953,18 +954,29 @@ async def get_whatsapp_chats(
                 )
         else:
             # For individuals, try multiple name fields in priority order
-            name = (
-                contact_info.get("name") or         # From contacts (best)
-                chat.get("notify") or               # Notify name (good source)
-                chat.get("verifiedName") or         # Verified name  
-                chat.get("pushName") or             # Push name
-                chat.get("name") or                 # Chat name
-                (last_msg.get("pushName") if last_msg else None) or  # Last message sender
-                phone                               # Final fallback
-            )
+            # Avoid self-reference names like "Você", "You", "أنت"
+            self_names = {"Você", "You", "أنت", "Yo", "Tu", "Tú"}
+            
+            name = contact_info.get("name") or ""
+            if not name or name in self_names:
+                name = chat.get("notify") or ""
+            if not name or name in self_names:
+                name = chat.get("verifiedName") or ""
+            if not name or name in self_names:
+                name = chat.get("pushName") or ""
+            if not name or name in self_names:
+                name = chat.get("name") or ""
+            if not name or name in self_names:
+                # Try pushName from last message, but skip if it's self
+                msg_push = last_msg.get("pushName") if last_msg else None
+                if msg_push and msg_push not in self_names:
+                    name = msg_push
+            if not name or name in self_names:
+                # Final fallback: use phone number
+                name = phone if phone else f"+{remote_jid.split('@')[0]}"
         
-        # Skip if name is still self-reference
-        if name in ["Você", "You", "أنت", "Yo"]:
+        # Skip only if name is still empty (not if it's a phone number)
+        if not name:
             continue
         
         # Get profile picture from contacts, chat, or group cache
@@ -1061,35 +1073,37 @@ async def get_whatsapp_chats(
         # Use the JID that has the most recent messages for API calls
         api_jid = display_jid if is_lid else remote_jid
         
-        # Only add if we haven't reached the limit
-        if len(seen_normalized_jids) <= limit:
-            seen_normalized_jids[normalized_jid] = {
-                "id": api_jid,  # Use the JID with newest messages
-                "remote_jid": api_jid,
-                "phone": display_phone if display_phone else name,
-                "name": name,
-                "last_message": last_message_content[:100] if last_message_content else "",
-                "last_message_type": last_msg_type,
-                "last_message_time": time_str,
-                "unread_count": chat.get("unreadCount", 0),
-                "is_group": is_group,
-                "profile_pic": profile_pic,
-                "is_banned": is_banned,
-                "platform": "whatsapp",
-                "lid_jid": remote_jid if is_lid else None,  # Store @lid JID for reference
-                "phone_jid": normalized_jid if normalized_jid != remote_jid else None  # Store phone JID
-            }
+        # Add the chat data (no limit here - pagination applied after processing)
+        seen_normalized_jids[normalized_jid] = {
+            "id": api_jid,  # Use the JID with newest messages
+            "remote_jid": api_jid,
+            "phone": display_phone if display_phone else name,
+            "name": name,
+            "last_message": last_message_content[:100] if last_message_content else "",
+            "last_message_type": last_msg_type,
+            "last_message_time": time_str,
+            "unread_count": chat.get("unreadCount", 0),
+            "is_group": is_group,
+            "profile_pic": profile_pic,
+            "is_banned": is_banned,
+            "platform": "whatsapp",
+            "lid_jid": remote_jid if is_lid else None,  # Store @lid JID for reference
+            "phone_jid": normalized_jid if normalized_jid != remote_jid else None  # Store phone JID
+        }
     
     # Convert to list and sort by last message time (most recent first)
     result = [v for v in seen_normalized_jids.values() if isinstance(v, dict)]
     result.sort(key=lambda x: x.get("last_message_time", ""), reverse=True)
     
-    # Limit results
-    result = result[:limit]
+    # Total before pagination
+    total_count = len(result)
+    
+    # Apply pagination (offset and limit)
+    result = result[offset:offset + limit]
     
     return {
         "items": result,
-        "total": len(result)
+        "total": total_count
     }
 
 

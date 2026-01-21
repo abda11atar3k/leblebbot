@@ -194,10 +194,11 @@ class EvolutionService(EvolutionClient):
             return contacts[:limit] if isinstance(contacts, list) else []
         return []
 
-    async def get_chats(self, limit: int = 50) -> list[dict]:
-        """Get recent chats from Evolution API.
+    async def get_chats(self, limit: int = 1000) -> list[dict]:
+        """Get all chats from Evolution API.
         
         Uses findMessages as fallback since findChats has a bug with null mediaUrl.
+        Returns all chats for proper pagination at the routes level.
         """
         # Try findChats first
         result = await self._request(
@@ -206,10 +207,16 @@ class EvolutionService(EvolutionClient):
             {}
         )
         
-        if result.get("success") and result.get("data"):
-            chats = result["data"]
-            if isinstance(chats, list) and len(chats) > 0:
-                return chats[:limit]
+        # Evolution API returns chats directly as list OR as {"data": [...]}
+        chats = None
+        if result.get("success"):
+            data = result.get("data")
+            if isinstance(data, list) and len(data) > 0:
+                chats = data
+        
+        if chats and len(chats) > 0:
+            logger.info(f"findChats returned {len(chats)} chats")
+            return chats  # Return all chats, pagination handled by caller
         
         # Fallback: Build chats from recent messages
         # This is a workaround for Evolution API bug with null mediaUrl

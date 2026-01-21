@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Search, RefreshCw, Ban, Users } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Search, RefreshCw, Ban, Users, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "@/lib/i18n";
 import { formatPhoneE164, isPhoneLike } from "@/lib/formatters/phone";
@@ -56,8 +56,14 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [conversations, setConversations] = useState<UnifiedConversation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [whatsappCount, setWhatsappCount] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const listRef = useRef<HTMLDivElement>(null);
   const { t, isRTL } = useTranslation();
+  
+  const ITEMS_PER_PAGE = 50;
 
   // Format phone number for display
   const formatPhoneForDisplay = (phone: string): string => {
@@ -65,62 +71,84 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
     return isPhoneLike(phone) ? formatPhoneE164(phone) : phone;
   };
 
-  const loadConversations = useCallback(async () => {
-    setLoading(true);
+  // Convert chat to unified format
+  const chatToUnified = (chat: WhatsAppChat): UnifiedConversation => {
+    let displayName = chat.name;
+    const isJustNumber = displayName.replace(/\D/g, '').length === displayName.length;
+    if ((isJustNumber && displayName.length > 10) || isPhoneLike(displayName)) {
+      displayName = formatPhoneForDisplay(displayName);
+    }
+    
+    return {
+      id: chat.remote_jid,
+      name: displayName,
+      phone: chat.phone,
+      lastMessage: chat.last_message,
+      lastMessageType: chat.last_message_type,
+      updatedAt: chat.last_message_time,
+      channel: "whatsapp",
+      unreadCount: chat.unread_count,
+      escalated: false,
+      isWhatsApp: true,
+      isGroup: chat.is_group,
+      isBanned: chat.is_banned || false,
+      profilePic: chat.profile_pic,
+      remoteJid: chat.remote_jid,
+    };
+  };
+
+  const loadConversations = useCallback(async (isLoadMore = false, nextPage?: number) => {
+    if (isLoadMore) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      setPage(1);
+    }
+    
+    const currentPage = nextPage || (isLoadMore ? page : 1);
+    const offset = (currentPage - 1) * ITEMS_PER_PAGE;
     
     try {
       if (platformFilter === "whatsapp") {
-        // Load directly from Evolution API - NO search parameter (client-side only)
-        const data = await fetchWhatsAppChats(100, undefined);
+        // Load directly from Evolution API
+        const data = await fetchWhatsAppChats(ITEMS_PER_PAGE, undefined, offset);
         setWhatsappCount(data.total);
         
         // Deduplicate by id/remote_jid on frontend as well
-        const seenIds = new Set<string>();
-        const unified: UnifiedConversation[] = [];
+        const existingIds = isLoadMore 
+          ? new Set(conversations.map(c => c.id))
+          : new Set<string>();
+        
+        const newUnified: UnifiedConversation[] = [];
         
         for (const chat of data.items) {
-          if (seenIds.has(chat.remote_jid)) continue;
-          seenIds.add(chat.remote_jid);
-          
-          // If name is just a long number, format it nicely
-          let displayName = chat.name;
-          const isJustNumber = displayName.replace(/\D/g, '').length === displayName.length;
-          if ((isJustNumber && displayName.length > 10) || isPhoneLike(displayName)) {
-            displayName = formatPhoneForDisplay(displayName);
-          }
-          
-          unified.push({
-            id: chat.remote_jid,
-            name: displayName,
-            phone: chat.phone,
-            lastMessage: chat.last_message,
-            lastMessageType: chat.last_message_type,
-            updatedAt: chat.last_message_time,
-            channel: "whatsapp",
-            unreadCount: chat.unread_count,
-            escalated: false,
-            isWhatsApp: true,
-            isGroup: chat.is_group,
-            isBanned: chat.is_banned || false,
-            profilePic: chat.profile_pic,
-            remoteJid: chat.remote_jid,
-          });
+          if (existingIds.has(chat.remote_jid)) continue;
+          existingIds.add(chat.remote_jid);
+          newUnified.push(chatToUnified(chat));
         }
         
-        setConversations(unified);
+        if (isLoadMore) {
+          setConversations(prev => [...prev, ...newUnified]);
+        } else {
+          setConversations(newUnified);
+          // Preload top 5 chats for instant opening
+          const chatIds = newUnified.map(c => c.id);
+          preloadTopChats(chatIds, 5);
+        }
         
-        // Preload top 5 chats for instant opening
-        const chatIds = unified.map(c => c.id);
-        preloadTopChats(chatIds, 5);
+        // Check if there are more items
+        const totalLoaded = offset + data.items.length;
+        setHasMore(totalLoaded < data.total);
+        
       } else {
         // Load from MongoDB
         const status = statusFilter === "all" ? undefined : statusFilter === "escalated" ? "active" : statusFilter;
         const escalated = statusFilter === "escalated" ? true : undefined;
         const channel = platformFilter === "all" ? undefined : platformFilter;
         
-        const data = await fetchConversations(status, escalated, 50, 0, channel);
+        const data = await fetchConversations(status, escalated, ITEMS_PER_PAGE, offset, channel);
         
-        const unified: UnifiedConversation[] = data.items.map((conv: Conversation) => ({
+        const newUnified: UnifiedConversation[] = data.items.map((conv: Conversation) => ({
           id: conv.id,
           name: conv.user?.name || conv.user?.phone || "مجهول",
           phone: conv.user?.phone,
@@ -135,10 +163,16 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
           profilePic: null,
         }));
         
-        setConversations(unified);
+        if (isLoadMore) {
+          setConversations(prev => [...prev, ...newUnified]);
+        } else {
+          setConversations(newUnified);
+        }
+        
+        setHasMore(data.items.length === ITEMS_PER_PAGE);
         
         // Also fetch WhatsApp count for badge
-        if (platformFilter === "all") {
+        if (platformFilter === "all" && !isLoadMore) {
           const waData = await fetchWhatsAppChats(1);
           setWhatsappCount(waData.total);
         }
@@ -147,16 +181,37 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
       console.error("Error loading conversations:", error);
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, [platformFilter, statusFilter, search]);
+  }, [platformFilter, statusFilter, page, conversations]);
 
   useEffect(() => {
-    loadConversations();
+    loadConversations(false);
     
-    // Auto-refresh every 5 seconds for faster updates
-    const interval = setInterval(loadConversations, 5000);
+    // Auto-refresh every 10 seconds (don't refresh too often with pagination)
+    const interval = setInterval(() => loadConversations(false), 10000);
     return () => clearInterval(interval);
-  }, [loadConversations]);
+  }, [platformFilter, statusFilter]);
+  
+  // Load more when scrolling to bottom
+  const loadMore = useCallback(() => {
+    if (!loadingMore && hasMore) {
+      const nextPage = page + 1;
+      setPage(nextPage);
+      loadConversations(true, nextPage);
+    }
+  }, [loadingMore, hasMore, page, loadConversations]);
+  
+  // Infinite scroll handler
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLDivElement;
+    const scrollBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    
+    // Load more when within 200px of bottom
+    if (scrollBottom < 200 && !loadingMore && hasMore) {
+      loadMore();
+    }
+  }, [loadMore, loadingMore, hasMore]);
 
   // Filter by search locally
   const filteredConversations = conversations.filter((conv) => {
@@ -198,9 +253,9 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
 
   const platformLabels: Record<PlatformFilter, { label: string; icon: string }> = {
     all: { label: "الكل", icon: "📱" },
-    whatsapp: { label: "WhatsApp", icon: "💬" },
-    messenger: { label: "Messenger", icon: "📘" },
-    instagram: { label: "Instagram", icon: "📷" },
+    whatsapp: { label: "واتس", icon: "💬" },
+    messenger: { label: "مسنجر", icon: "📘" },
+    instagram: { label: "انستا", icon: "📷" },
   };
 
   const handleSelect = (conv: UnifiedConversation) => {
@@ -222,7 +277,7 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
             {t("conversations.title") || "المحادثات"}
           </h2>
           <button 
-            onClick={loadConversations}
+            onClick={() => loadConversations(false)}
             className="p-1.5 rounded-lg hover:bg-surface-elevated transition-colors"
             title="تحديث"
           >
@@ -239,32 +294,39 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
 
       {/* Platform Filters */}
       <div className={cn(
-        "flex items-center gap-1 p-2 border-b border-border overflow-x-auto scrollbar-hide flex-shrink-0",
-        isRTL && "flex-row-reverse"
+        "flex items-center gap-1 p-2 border-b border-border flex-shrink-0",
+        isRTL && "flex-row-reverse justify-end"
       )}>
-        {(["all", "whatsapp", "messenger", "instagram"] as PlatformFilter[]).map((p) => (
-          <button
-            key={p}
-            onClick={() => setPlatformFilter(p)}
-            className={cn(
-              "flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-lg whitespace-nowrap transition-colors duration-150 flex-shrink-0",
-              platformFilter === p
-                ? "bg-primary text-white shadow-soft"
-                : "text-muted hover:text-foreground hover:bg-surface-elevated"
-            )}
-          >
-            <span className="text-sm">{platformLabels[p].icon}</span>
-            <span className="hidden sm:inline">{platformLabels[p].label}</span>
-            {p === "whatsapp" && whatsappCount > 0 && (
-              <span className={cn(
-                "text-[10px] px-1.5 py-0.5 rounded-full",
-                platformFilter === p ? "bg-white/20" : "bg-primary/10 text-primary"
-              )}>
-                {whatsappCount}
-              </span>
-            )}
-          </button>
-        ))}
+        {(["all", "whatsapp", "messenger", "instagram"] as PlatformFilter[]).map((p) => {
+          const isActive = platformFilter === p;
+          const showLabel = p === "all" || p === "whatsapp"; // Only show labels for main filters
+          
+          return (
+            <button
+              key={p}
+              onClick={() => setPlatformFilter(p)}
+              title={platformLabels[p].label}
+              className={cn(
+                "flex items-center gap-1 py-1 text-[11px] font-medium rounded-full whitespace-nowrap transition-all duration-150 border",
+                showLabel ? "px-2" : "px-1.5",
+                isActive
+                  ? "bg-primary text-white border-primary shadow-sm"
+                  : "bg-surface-elevated/30 text-muted border-border/50 hover:text-foreground hover:border-primary/30"
+              )}
+            >
+              <span className="text-xs">{platformLabels[p].icon}</span>
+              {showLabel && <span>{platformLabels[p].label}</span>}
+              {p === "whatsapp" && whatsappCount > 0 && (
+                <span className={cn(
+                  "text-[9px] px-1 py-0.5 rounded-full font-bold min-w-[16px] text-center",
+                  isActive ? "bg-white/25 text-white" : "bg-primary/15 text-primary"
+                )}>
+                  {whatsappCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Status Filters - only show when not filtering by WhatsApp from Evolution API */}
@@ -291,7 +353,11 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
       )}
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin min-h-0">
+      <div 
+        ref={listRef}
+        className="flex-1 overflow-y-auto scrollbar-thin min-h-0"
+        onScroll={handleScroll}
+      >
         {loading && conversations.length === 0 ? (
           // Loading skeleton
           <div className="space-y-0">
@@ -313,7 +379,8 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
             }
           </div>
         ) : (
-          filteredConversations.map((conv) => (
+          <>
+          {filteredConversations.map((conv) => (
             <button
               key={conv.id}
               onClick={() => handleSelect(conv)}
@@ -383,7 +450,23 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
                 </span>
               )}
             </button>
-          ))
+          ))}
+          
+          {/* Loading more indicator */}
+          {loadingMore && (
+            <div className="flex items-center justify-center py-4 gap-2 text-muted">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-xs">جاري التحميل...</span>
+            </div>
+          )}
+          
+          {/* End of list message */}
+          {!hasMore && conversations.length > ITEMS_PER_PAGE && (
+            <div className="text-center py-4 text-muted text-xs">
+              تم عرض كل المحادثات ({conversations.length})
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>
