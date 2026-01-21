@@ -264,8 +264,7 @@ export function ConversationList({ selectedId, onSelect }: ConversationListProps
 
   return (
     <div className={cn(
-      "w-80 flex flex-col bg-surface shadow-soft h-full",
-      isRTL ? "border-s border-border" : "border-e border-border"
+      "w-full flex flex-col bg-surface shadow-soft h-full overflow-hidden"
     )}>
       {/* Header */}
       <div className="p-4 border-b border-border flex-shrink-0">
